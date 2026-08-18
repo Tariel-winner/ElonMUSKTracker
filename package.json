@@ -1,0 +1,19 @@
+{
+  "name": "billionaire-tracker-backend",
+  "version": "1.0.0",
+  "description": "Real-time Elon Musk movement tracker",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.14.2",
+    "node-cron": "^3.0.2",
+    "sqlite3": "^5.1.6",
+    "node-fetch": "^2.6.7"
+  }
+}
