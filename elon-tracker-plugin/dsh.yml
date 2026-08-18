@@ -1,0 +1,6 @@
+schema: '0.1'
+name: elon-tracker
+version: '1.0.0'
+description: Tracks Elon Musk using DeepSeek AI
+author: Your Name
+main: index.js
