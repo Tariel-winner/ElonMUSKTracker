@@ -367,6 +367,7 @@
       display: inline-flex;
       align-items: center;
       gap: 4px;
+      cursor: pointer;
     }
     
     .timeline-events .event .time {
@@ -423,8 +424,28 @@
     }
     
     .timeline-events .event:hover {
-      background: rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.08);
       transform: translateY(-1px);
+    }
+    
+    /* Active event highlighting */
+    .timeline-events .event.active {
+      background: rgba(0, 212, 255, 0.2);
+      border-left-color: #00d4ff;
+      box-shadow: 0 0 20px rgba(0, 212, 255, 0.15);
+      transform: scale(1.05);
+    }
+    
+    .timeline-events .event.active .dest {
+      color: #00d4ff;
+      font-weight: 700;
+    }
+    
+    .timeline-events .event.count-info {
+      background: rgba(255, 255, 255, 0.03);
+      border-left-color: #555;
+      color: #666;
+      font-size: 9px;
     }
     
     /* Scrollbar styling */

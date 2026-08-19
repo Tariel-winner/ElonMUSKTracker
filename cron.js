@@ -1,10 +1,53 @@
 const fetch = require('node-fetch');
+const fs = require('fs');
 const db = require('./db');
 const cache = require('./memory-cache');
 const { generateConclusion } = require('./ai-correlator');
 const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
 const { askDeepSeek } = require('./deepseek-client');
+
+// --- OpenSky OAuth2 Token Management ---
+let openSkyToken = null;
+let tokenExpiry = null;
+const CLIENT_ID = "tarel.tarik23@gmail.com-api-client";
+const CLIENT_SECRET = "yEluqjz2pROsOSHXqPYhX3rBg2edHR4U";
+
+async function getOpenSkyToken() {
+  // If token is still valid (within 5 min of expiry), return it
+  if (openSkyToken && tokenExpiry && Date.now() < tokenExpiry - 300000) {
+    return openSkyToken;
+  }
+  
+  try {
+    console.log('[CRON] 🔑 Requesting new OpenSky OAuth2 token...');
+    const response = await fetch(
+      'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: CLIENT_ID,
+          client_secret: CLIENT_SECRET
+        })
+      }
+    );
+    
+    if (!response.ok) {
+      throw new Error(`Token request failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    openSkyToken = data.access_token;
+    tokenExpiry = Date.now() + (data.expires_in * 1000);
+    console.log(`[CRON] ✅ OpenSky OAuth2 token obtained (expires in ${data.expires_in}s)`);
+    return openSkyToken;
+  } catch (err) {
+    console.error('[CRON] ❌ Failed to get OpenSky token:', err.message);
+    return null;
+  }
+}
 
 // --- DeepSeek API Caching ---
 let lastDeepSeekCallTime = 0;
@@ -52,9 +95,15 @@ function calculateHeadingFromPositions(lat1, lon1, lat2, lon2) {
   return heading;
 }
 
-// Helper: Find nearest property
+// Helper: Find nearest property (includes ALL property types)
 function findNearestProperty(lat, lng) {
-  const allProps = [...staticData.corporate_hqs, ...staticData.residences];
+  const allProps = [
+    ...staticData.corporate_hqs,
+    ...staticData.residences,
+    ...(staticData.family_properties || []),
+    ...(staticData.friends_properties || []),
+    ...(staticData.frequent_destinations || [])
+  ];
   let nearest = null;
   let minDist = Infinity;
   
@@ -82,18 +131,75 @@ async function runCronJob() {
   console.log('[CRON] Fetching data at', new Date().toISOString());
 
   try {
-    // --- 1. Fetch flight data from OpenSky ---
-    const adsbRes = await fetch('https://opensky-network.org/api/states/all');
+    // --- 1. Get OAuth2 Token ---
+    const token = await getOpenSkyToken();
+    const headers = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    } else {
+      console.warn('[CRON] ⚠️ No token available, trying anonymous access...');
+    }
+    
+    // --- 2. Fetch flight data with retry logic ---
+    let adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { headers });
+    
+    // If rate limited, retry with exponential backoff
+    if (adsbRes.status === 429) {
+      console.warn('[CRON] ⚠️ Rate limited. Retrying with exponential backoff...');
+      let retryDelay = 5000;
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      while (retryCount < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        retryCount++;
+        console.warn(`[CRON] Retry ${retryCount}/${maxRetries} after ${retryDelay}ms...`);
+        
+        // Refresh token before retry
+        const newToken = await getOpenSkyToken();
+        const retryHeaders = {};
+        if (newToken) {
+          retryHeaders['Authorization'] = `Bearer ${newToken}`;
+        }
+        
+        adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { headers: retryHeaders });
+        
+        if (adsbRes.ok) {
+          console.warn('[CRON] ✅ Retry successful!');
+          break;
+        }
+        
+        if (adsbRes.status !== 429) {
+          throw new Error(`OpenSky API returned ${adsbRes.status}`);
+        }
+        
+        // Double the delay for next retry (exponential backoff)
+        retryDelay *= 2;
+      }
+      
+      if (!adsbRes.ok && adsbRes.status === 429) {
+        console.warn('[CRON] ⚠️ Still rate limited after retries. Skipping this cycle.');
+        return;
+      }
+    }
+    
     if (!adsbRes.ok) {
       throw new Error(`OpenSky API returned ${adsbRes.status}`);
     }
+    
+    // Check rate limit headers
+    const remaining = adsbRes.headers.get('x-rate-limit-remaining');
+    if (remaining) {
+      console.log(`[CRON] 📊 Credits remaining: ${remaining}`);
+    }
+    
     const adsbData = await adsbRes.json();
     const states = adsbData.states || [];
     const flightState = states.find(f => f[1] && f[1].trim() === 'N628TS');
 
     const now = new Date().toISOString();
 
-    // --- 2. IF JET IS FLYING ---
+    // --- 3. IF JET IS FLYING ---
     if (flightState) {
       const flight = {
         lat: flightState[6],
@@ -110,10 +216,12 @@ async function runCronJob() {
 
       console.log(`[CRON] Jet found: ${flight.callsign} at ${flight.lat}, ${flight.lon}`);
 
+      // --- Insert raw flight data (sqlite3 callback) ---
       db.run(
         `INSERT INTO raw_flight_data (timestamp, lat, lng, altitude, speed, heading, on_ground, vert_rate, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [now, flight.lat, flight.lon, flight.alt_baro, flight.gs, flight.track, flight.on_ground ? 1 : 0, flight.vert_rate, JSON.stringify(flight)]
+        [now, flight.lat, flight.lon, flight.alt_baro, flight.gs, flight.track, flight.on_ground ? 1 : 0, flight.vert_rate, JSON.stringify(flight)],
+        (err) => { if (err) console.error('[DB] Insert flight error:', err); }
       );
 
       const prev = cache.currentFlight;
@@ -216,11 +324,12 @@ async function runCronJob() {
         }
       }
 
-      // --- Save conclusion ---
+      // --- Save conclusion (sqlite3 callback) ---
       db.run(
         `INSERT INTO ai_conclusions (timestamp, state, current_location, destination, confidence, reasoning, prediction_type, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [now, conclusion.state, conclusion.current_location, conclusion.destination, conclusion.confidence, JSON.stringify(conclusion.reasoning), conclusion.prediction_type, JSON.stringify(conclusion)]
+        [now, conclusion.state, conclusion.current_location, conclusion.destination, conclusion.confidence, JSON.stringify(conclusion.reasoning), conclusion.prediction_type, JSON.stringify(conclusion)],
+        (err) => { if (err) console.error('[DB] Insert conclusion error:', err); }
       );
 
       cache.previousFlight = cache.currentFlight;
@@ -244,7 +353,7 @@ async function runCronJob() {
       }
     }
 
-    // --- 3. IF JET IS NOT FLYING (Ground Inference with CACHED DeepSeek) ---
+    // --- 4. IF JET IS NOT FLYING (Ground Inference with CACHED DeepSeek) ---
     else {
       console.log('[CRON] Jet not found - using cached DeepSeek AI.');
 
@@ -351,11 +460,12 @@ async function runCronJob() {
         }
       }
 
-      // --- Save conclusion ---
+      // --- Save conclusion (sqlite3 callback) ---
       db.run(
         `INSERT INTO ai_conclusions (timestamp, state, current_location, destination, confidence, reasoning, prediction_type, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [now, conclusion.state, conclusion.current_location, conclusion.destination, conclusion.confidence, JSON.stringify(conclusion.reasoning), conclusion.prediction_type, JSON.stringify(conclusion)]
+        [now, conclusion.state, conclusion.current_location, conclusion.destination, conclusion.confidence, JSON.stringify(conclusion.reasoning), conclusion.prediction_type, JSON.stringify(conclusion)],
+        (err) => { if (err) console.error('[DB] Insert conclusion error:', err); }
       );
 
       cache.latestConclusion = conclusion;

@@ -1,6 +1,8 @@
 // frontend-polling.js
 // Complete frontend logic with map, status card, and timeline slider
 // OPTIMIZED: No re-render on every poll, only update changed values
+// TIMELINE: Shows last 100 events with full date/time and active highlighting
+// SYNC: Slider and event list stay in sync
 
 class ElonTracker {
   constructor() {
@@ -11,7 +13,10 @@ class ElonTracker {
     this.map = null;
     this.markers = { plane: null, destination: null, path: null, car: null };
     this.lastSliderValue = 100;
-    this.dom = {}; // Cache DOM elements
+    this.dom = {};
+    this.activeEventIndex = -1;
+    this.eventElements = [];
+    this.isUserInteracting = false;
   }
 
   // =============================================
@@ -20,9 +25,7 @@ class ElonTracker {
   async init() {
     console.log('🚀 Initializing Elon Musk Tracker...');
     
-    // Cache DOM elements first
     this.cacheDomElements();
-    
     this.initMap();
     await this.loadHistory();
     await this.loadCurrent();
@@ -58,7 +61,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 2. MAP SETUP (Leaflet)
+  // 2. MAP SETUP
   // =============================================
   initMap() {
     this.map = L.map('map', {
@@ -137,19 +140,20 @@ class ElonTracker {
   // =============================================
   startPolling() {
     this.pollingInterval = setInterval(() => {
-      if (this.isLiveMode) {
+      if (this.isLiveMode && !this.isUserInteracting) {
         this.loadCurrent();
       }
     }, 10000);
   }
 
   // =============================================
-  // 5. SLIDER
+  // 5. SLIDER - SYNCED WITH TIMELINE
   // =============================================
   setupSlider() {
     const slider = this.dom.timeSlider;
     
     slider.addEventListener('input', (e) => {
+      this.isUserInteracting = true;
       const val = parseInt(e.target.value);
       this.lastSliderValue = val;
       
@@ -160,21 +164,34 @@ class ElonTracker {
       
       if (dataPoint) {
         this.isLiveMode = false;
-        this.dom.sliderMode.textContent = '⏸️ PAUSED';
-        this.dom.sliderMode.className = 'live-label paused';
+        this.activeEventIndex = index;
         this.currentData = dataPoint;
+        
+        // Update slider mode text with timestamp
+        const formattedTime = this.formatTimestamp(dataPoint.timestamp);
+        this.dom.sliderMode.textContent = `⏸️ ${formattedTime}`;
+        this.dom.sliderMode.className = 'live-label paused';
+        
+        // Update all UI
         this.updateUI();
         this.updateMap();
         this.updateStatusCard();
+        
+        // Highlight and scroll to the active event
+        this.highlightActiveEvent(index);
+        this.scrollToActiveEvent(index);
       }
     });
     
     slider.addEventListener('mouseup', () => {
+      this.isUserInteracting = false;
       setTimeout(() => {
         this.isLiveMode = true;
+        this.activeEventIndex = -1;
         this.dom.sliderMode.textContent = '🔴 LIVE';
         this.dom.sliderMode.className = 'live-label';
         this.loadCurrent();
+        this.clearActiveHighlight();
       }, 3000);
     });
   }
@@ -200,13 +217,16 @@ class ElonTracker {
         if (index !== -1) {
           const pct = (index / (this.historyData.length - 1)) * 100;
           this.dom.timeSlider.value = pct;
+          // Also highlight the corresponding event
+          this.highlightActiveEvent(index);
+          this.scrollToActiveEvent(index);
         }
       }
     }
   }
 
   // =============================================
-  // 7. MAP UPDATE (All Cases Covered)
+  // 7. MAP UPDATE
   // =============================================
   updateMap() {
     if (!this.currentData || !this.map) return;
@@ -399,32 +419,27 @@ class ElonTracker {
   }
 
   // =============================================
-  // 8. GET DESTINATION COORDINATES (Full List)
+  // 8. GET DESTINATION COORDINATES
   // =============================================
   getDestinationCoords(destName) {
     const knownCoords = {
-      // Corporate HQs
       'Tesla HQ': { lat: 30.2655, lng: -97.7044 },
       'SpaceX HQ': { lat: 33.9207, lng: -118.3271 },
       'xAI HQ': { lat: 37.4450, lng: -122.1470 },
       'The Boring Company HQ': { lat: 30.2455, lng: -97.7120 },
       'Neuralink HQ': { lat: 37.4880, lng: -121.9380 },
-      // Residences
       'Bel Air Mansion': { lat: 34.0882, lng: -118.4420 },
       'Manhattan Penthouse': { lat: 40.7773, lng: -73.9760 },
       'Austin Ranch': { lat: 30.2500, lng: -97.5000 },
       'Lake Austin Property': { lat: 30.3140, lng: -97.8680 },
       'Jackson Hole Property': { lat: 43.4800, lng: -110.7620 },
-      // Family Properties
       'Kimbal\'s Farm': { lat: 40.0145, lng: -105.2705 },
       'Kimbal\'s NYC Restaurant': { lat: 40.7422, lng: -73.9885 },
       'Maye\'s NYC Apartment': { lat: 40.7580, lng: -73.9855 },
       'Maye\'s LA Residence': { lat: 34.0522, lng: -118.2437 },
       'Grimes\' Malibu House': { lat: 34.0250, lng: -118.7800 },
-      // Friends Properties
       'Larry Ellison\'s Lanai Estate': { lat: 20.6789, lng: -156.0000 },
       'Peter Thiel\'s LA Mansion': { lat: 34.0845, lng: -118.4485 },
-      // Event Destinations
       'Miami (F1/Events)': { lat: 25.7617, lng: -80.1918 },
       'Las Vegas (UFC/Events)': { lat: 36.1699, lng: -115.1398 },
       'Sun Valley, Idaho': { lat: 43.6941, lng: -114.3521 },
@@ -443,7 +458,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 9. STATUS CARD UPDATE (No Re-render!)
+  // 9. STATUS CARD UPDATE
   // =============================================
   updateStatusCard() {
     if (!this.currentData) return;
@@ -461,37 +476,31 @@ class ElonTracker {
     
     const stateInfo = stateMap[data.state] || stateMap['unknown'];
     
-    // Update card class (only if changed)
     const newClass = `status-card ${stateInfo.color}`;
     if (d.statusCard.className !== newClass) {
       d.statusCard.className = newClass;
     }
     
-    // Update icon
     if (d.statusIcon.textContent !== stateInfo.icon) {
       d.statusIcon.textContent = stateInfo.icon;
     }
     
-    // Update state label
     if (d.statusState.textContent !== stateInfo.label) {
       d.statusState.textContent = stateInfo.label;
       d.statusState.className = `state ${stateInfo.color}`;
     }
     
-    // Update badge
     const badgeText = this.isLiveMode ? '● LIVE' : '⏸️ PAUSED';
     if (d.statusBadge.textContent !== badgeText) {
       d.statusBadge.textContent = badgeText;
       d.statusBadge.style.color = this.isLiveMode ? '#00ff88' : '#ffaa00';
     }
     
-    // Current location
     const locationText = data.current_location || 'Unknown';
     if (d.currentLocation.textContent !== locationText) {
       d.currentLocation.textContent = locationText;
     }
     
-    // Destination
     const destEl = d.destination;
     if (data.destination && data.destination !== 'Unknown') {
       if (destEl.textContent !== data.destination) {
@@ -509,7 +518,6 @@ class ElonTracker {
       }
     }
     
-    // Confidence
     const pct = Math.round((data.confidence || 0) * 100);
     const confText = `${pct}%`;
     if (d.confidence.textContent !== confText) {
@@ -517,7 +525,6 @@ class ElonTracker {
     }
     d.confidenceFill.style.width = `${pct}%`;
     
-    // Reasoning
     const reasoningEl = d.reasoning;
     if (data.reasoning && data.reasoning.length > 0) {
       const newReasoning = data.reasoning.map(r => `<li>${r}</li>`).join('');
@@ -528,15 +535,14 @@ class ElonTracker {
       reasoningEl.innerHTML = '<li>No reasoning available</li>';
     }
     
-    // Timestamp
-    const tsText = data.timestamp ? `⏰ ${new Date(data.timestamp).toLocaleString()}` : '—';
+    const tsText = data.timestamp ? `⏰ ${this.formatTimestamp(data.timestamp)}` : '—';
     if (d.timestamp.textContent !== tsText) {
       d.timestamp.textContent = tsText;
     }
   }
 
   // =============================================
-  // 10. TIMELINE RENDER
+  // 10. TIMELINE RENDER (Enhanced with Full Date/Time)
   // =============================================
   renderTimeline(history) {
     const container = this.dom.timelineEvents;
@@ -547,27 +553,149 @@ class ElonTracker {
       return;
     }
     
-    const events = history.slice(-20);
-    for (const item of events) {
+    const MAX_EVENTS = 100;
+    const events = history.length > MAX_EVENTS 
+      ? history.slice(-MAX_EVENTS) 
+      : history;
+    
+    if (history.length > MAX_EVENTS) {
+      const countEl = document.createElement('span');
+      countEl.className = 'event count-info';
+      countEl.textContent = `📊 Showing last ${MAX_EVENTS} of ${history.length} events`;
+      container.appendChild(countEl);
+    }
+    
+    this.eventElements = [];
+    
+    for (let i = 0; i < events.length; i++) {
+      const item = events[i];
       const el = document.createElement('span');
       el.className = 'event';
-      const time = new Date(item.timestamp).toLocaleTimeString([], { 
-        hour: '2-digit', 
-        minute: '2-digit' 
-      });
+      el.dataset.index = i;
+      
+      // ✅ FULL DATE/TIME FORMAT
+      const time = this.formatTimestamp(item.timestamp);
       const dest = item.destination || item.state || 'unknown';
       const conf = Math.round((item.confidence || 0) * 100);
       const icon = item.state === 'landed' ? '🛬' : 
                    item.state === 'in_flight' ? '🛫' : 
                    item.state === 'grounded' || item.state === 'parked' ? '🅿️' : '❓';
+      
       el.innerHTML = `<span class="time">${time}</span> ${icon} → <span class="dest">${dest}</span> <span class="conf">(${conf}%)</span>`;
+      
+      // Click to jump to this event
+      el.addEventListener('click', () => {
+        const globalIndex = history.length - events.length + i;
+        this.jumpToEvent(globalIndex);
+      });
+      
       container.appendChild(el);
+      this.eventElements.push(el);
+    }
+    
+    // Highlight the last event (most recent)
+    if (this.eventElements.length > 0) {
+      const lastIndex = this.eventElements.length - 1;
+      this.eventElements[lastIndex].classList.add('active');
+    }
+    
+    container.scrollTop = container.scrollHeight;
+  }
+
+  // =============================================
+  // 11. HELPER: Format Timestamp with Date
+  // =============================================
+  formatTimestamp(timestamp) {
+    if (!timestamp) return 'Unknown';
+    
+    const date = new Date(timestamp);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    if (date >= today) {
+      return `Today ${timeStr}`;
+    } else if (date >= yesterday) {
+      return `Yesterday ${timeStr}`;
+    } else {
+      return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + timeStr;
+    }
+  }
+
+  // =============================================
+  // 12. JUMP TO EVENT
+  // =============================================
+  jumpToEvent(index) {
+    if (index < 0 || index >= this.historyData.length) return;
+    
+    const dataPoint = this.historyData[index];
+    this.isLiveMode = false;
+    this.activeEventIndex = index;
+    this.currentData = dataPoint;
+    
+    const pct = (index / (this.historyData.length - 1)) * 100;
+    this.dom.timeSlider.value = pct;
+    const formattedTime = this.formatTimestamp(dataPoint.timestamp);
+    this.dom.sliderMode.textContent = `⏸️ ${formattedTime}`;
+    this.dom.sliderMode.className = 'live-label paused';
+    
+    this.updateUI();
+    this.updateMap();
+    this.updateStatusCard();
+    this.highlightActiveEvent(index);
+    this.scrollToActiveEvent(index);
+  }
+
+  // =============================================
+  // 13. HIGHLIGHT ACTIVE EVENT
+  // =============================================
+  highlightActiveEvent(index) {
+    this.clearActiveHighlight();
+    
+    const MAX_EVENTS = 100;
+    const events = this.historyData.length > MAX_EVENTS 
+      ? this.historyData.slice(-MAX_EVENTS) 
+      : this.historyData;
+    
+    const localIndex = index - (this.historyData.length - events.length);
+    
+    if (localIndex >= 0 && localIndex < this.eventElements.length) {
+      this.eventElements[localIndex].classList.add('active');
+    }
+  }
+
+  // =============================================
+  // 14. SCROLL TO ACTIVE EVENT
+  // =============================================
+  scrollToActiveEvent(index) {
+    const MAX_EVENTS = 100;
+    const events = this.historyData.length > MAX_EVENTS 
+      ? this.historyData.slice(-MAX_EVENTS) 
+      : this.historyData;
+    
+    const localIndex = index - (this.historyData.length - events.length);
+    
+    if (localIndex >= 0 && localIndex < this.eventElements.length) {
+      this.eventElements[localIndex].scrollIntoView({ 
+        behavior: 'smooth', 
+        block: 'nearest',
+        inline: 'nearest'
+      });
+    }
+  }
+
+  clearActiveHighlight() {
+    if (this.eventElements) {
+      this.eventElements.forEach(el => el.classList.remove('active'));
     }
   }
 }
 
 // =============================================
-// 11. START
+// 15. START
 // =============================================
 document.addEventListener('DOMContentLoaded', () => {
   const tracker = new ElonTracker();

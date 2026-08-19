@@ -4,6 +4,7 @@ const path = require('path');
 const { runCronJob } = require('./cron');
 const cache = require('./memory-cache');
 const history = require('./history');
+const db = require('./db');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -38,7 +39,9 @@ app.get('/api/current', async (req, res) => {
 app.get('/api/history', async (req, res) => {
   try {
     const rows = await history.getHistory24Hours();
-    res.json(rows);
+    // ✅ OPTIMIZED: Limit to last 100 for frontend performance
+    const limited = rows.slice(-100);
+    res.json(limited);
   } catch (err) {
     console.error('[API] /api/history error:', err);
     res.status(500).json({ error: err.message });
@@ -86,11 +89,43 @@ app.get('/', (req, res) => {
 });
 
 // =============================================
-// CRON JOB (Every 30 seconds)
+// CRON JOB (Every 60 seconds)
 // =============================================
 
-cron.schedule('*/30 * * * * *', async () => {
+cron.schedule('*/60 * * * * *', async () => {
   await runCronJob();
+});
+
+// =============================================
+// CLEANUP JOB (Every 12 hours - keeps 12 hours of data)
+// =============================================
+
+// Run every 12 hours
+cron.schedule('0 */12 * * *', async () => {
+  try {
+    // Keep only last 12 hours of data (720 rows at 1/minute)
+    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+    
+    db.run(
+      `DELETE FROM raw_flight_data WHERE timestamp < ?`,
+      [twelveHoursAgo],
+      (err) => {
+        if (!err) console.log('[CLEANUP] ✅ Old flight data removed (older than 12 hours)');
+        else console.error('[CLEANUP] ❌ Failed to clean flight data:', err);
+      }
+    );
+    
+    db.run(
+      `DELETE FROM ai_conclusions WHERE timestamp < ?`,
+      [twelveHoursAgo],
+      (err) => {
+        if (!err) console.log('[CLEANUP] ✅ Old conclusions removed (older than 12 hours)');
+        else console.error('[CLEANUP] ❌ Failed to clean conclusions:', err);
+      }
+    );
+  } catch (err) {
+    console.error('[CLEANUP] ❌ Cleanup error:', err.message);
+  }
 });
 
 // =============================================
@@ -103,7 +138,8 @@ app.listen(port, () => {
 ║  🛩️  ELON MUSK TRACKER - BACKEND SERVER                 ║
 ╠══════════════════════════════════════════════════════════╣
 ║  🚀 HTTP Server:    http://localhost:${port}             ║
-║  ⏰ Cron Job:       Every 30 seconds                   ║
+║  ⏰ Cron Job:       Every 60 seconds                   ║
+║  🧹 Cleanup Job:    Every 12 hours                    ║
 ║  📊 Database:       SQLite (data.db)                   ║
 ╚══════════════════════════════════════════════════════════╝
   `);
@@ -111,7 +147,7 @@ app.listen(port, () => {
   console.log('📌 Endpoints:');
   console.log(`   GET /              → Frontend UI`);
   console.log(`   GET /api/current   → Latest conclusion`);
-  console.log(`   GET /api/history   → Last 24 hours`);
+  console.log(`   GET /api/history   → Last 24 hours (max 100 events)`);
   console.log(`   GET /api/snapshot  → Specific timestamp`);
   console.log(`   GET /api/flight-path → Raw flight data`);
   console.log(`   GET /health        → Health check`);
