@@ -1,9 +1,8 @@
 // frontend-polling.js
-// Complete frontend logic with map, status card, and timeline slider
+// Complete frontend logic with map, status card, and horizontal cards track
 // OPTIMIZED: No re-render on every poll, only update changed values
-// TIMELINE: Shows last 100 events with full date/time and active highlighting
-// CARDS: Syncs with timeline for double horizontal scroll
-// SYNC: Slider, timeline chips, and cards all stay in sync
+// CARDS: Horizontal scrollable cards synced with slider
+// SYNC: Slider and cards stay in sync
 // ZOOM: Preserves user zoom/pan when poll updates location
 
 class ElonTracker {
@@ -17,18 +16,14 @@ class ElonTracker {
     this.lastSliderValue = 100;
     this.dom = {};
     this.activeEventIndex = -1;
-    this.eventElements = [];
     this.cardElements = [];
     this.isUserInteracting = false;
     
     // --- SYNC FIXES ---
-    this.syncing = false;           // Prevents slider ↔ scroll loop
-    this.userScrolling = false;
+    this.syncing = false;
     this.scrollTimeout = null;
     this.MAX_EVENTS = 100;
-    this.pendingScrollJump = null;
     this.isUserBrowsingHistory = false;
-    this.scrollSource = null;       // ✅ Track which source triggered scroll
     
     // --- ZOOM FIX ---
     this.userMovedMap = false;
@@ -74,7 +69,6 @@ class ElonTracker {
       lastUpdated: document.getElementById('last-updated'),
       sliderMode: document.getElementById('slider-mode'),
       timeSlider: document.getElementById('time-slider'),
-      timelineEvents: document.getElementById('timeline-events'),
       cardsTrack: document.getElementById('cards-track'),
     };
   }
@@ -126,7 +120,6 @@ class ElonTracker {
         this.appendNewHistory(rows);
       } else {
         this.historyData = rows;
-        this.renderTimeline(rows);
         this.renderCards(rows);
       }
       
@@ -150,11 +143,6 @@ class ElonTracker {
     if (newEvents.length > 0) {
       const wasBrowsing = this.isUserBrowsingHistory;
       this.historyData.push(...newEvents);
-      
-      this.renderTimeline(this.historyData, { 
-        preserveScroll: wasBrowsing,
-        preserveActive: wasBrowsing && this.activeEventIndex >= 0
-      });
       
       this.renderCards(this.historyData, {
         preserveScroll: wasBrowsing,
@@ -220,7 +208,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 5. SLIDER - SYNCED WITH TIMELINE & CARDS
+  // 5. SLIDER - SYNCED WITH CARDS
   // =============================================
   setupSlider() {
     const slider = this.dom.timeSlider;
@@ -246,55 +234,29 @@ class ElonTracker {
   }
 
   // =============================================
-  // 6. SCROLL SYNC (Timeline + Cards)
+  // 6. SCROLL SYNC (Cards only)
   // =============================================
   setupScrollSync() {
-    // Timeline scroll
-    const list = this.dom.timelineEvents;
-    if (list) {
-      let scrollTimeout = null;
-      list.addEventListener('scroll', () => {
-        if (this.syncing) return;
-        if (this.historyData.length === 0 || this.eventElements.length === 0) return;
-        
-        clearTimeout(scrollTimeout);
-        scrollTimeout = setTimeout(() => {
-          this.handleScrollSync('timeline');
-        }, 100);
-      });
-    }
-    
-    // Cards scroll
     const cards = this.dom.cardsTrack;
-    if (cards) {
-      let cardsScrollTimeout = null;
-      cards.addEventListener('scroll', () => {
-        if (this.syncing) return;
-        if (this.historyData.length === 0 || this.cardElements.length === 0) return;
-        
-        clearTimeout(cardsScrollTimeout);
-        cardsScrollTimeout = setTimeout(() => {
-          this.handleScrollSync('cards');
-        }, 100);
-      });
-    }
+    if (!cards) return;
+    
+    let cardsScrollTimeout = null;
+    cards.addEventListener('scroll', () => {
+      if (this.syncing) return;
+      if (this.historyData.length === 0 || this.cardElements.length === 0) return;
+      
+      clearTimeout(cardsScrollTimeout);
+      cardsScrollTimeout = setTimeout(() => {
+        this.handleScrollSync();
+      }, 100);
+    });
   }
 
-  handleScrollSync(source) {
+  handleScrollSync() {
     if (this.syncing) return;
     
-    let container;
-    let elements;
-    
-    if (source === 'timeline') {
-      container = this.dom.timelineEvents;
-      elements = this.eventElements;
-    } else if (source === 'cards') {
-      container = this.dom.cardsTrack;
-      elements = this.cardElements;
-    } else {
-      return;
-    }
+    const container = this.dom.cardsTrack;
+    const elements = this.cardElements;
     
     if (!container || elements.length === 0) return;
     
@@ -317,8 +279,7 @@ class ElonTracker {
     const globalIndex = this.localToGlobal(best);
     if (globalIndex !== this.activeEventIndex) {
       this.isUserBrowsingHistory = true;
-      // ✅ FIX: Pass the source to jumpToEvent
-      this.jumpToEvent(globalIndex, 'scroll', source);
+      this.jumpToEvent(globalIndex, 'scroll');
     }
   }
 
@@ -343,9 +304,7 @@ class ElonTracker {
         if (index !== -1) {
           const pct = (index / (this.historyData.length - 1)) * 100;
           this.dom.timeSlider.value = pct;
-          this.highlightActiveEvent(index);
           this.highlightActiveCard(index);
-          this.scrollToActiveEvent(index);
           this.scrollToActiveCard(index);
         }
       }
@@ -686,89 +645,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 11. RENDER TIMELINE CHIPS
-  // =============================================
-  renderTimeline(history, options = {}) {
-    const container = this.dom.timelineEvents;
-    const savedScrollLeft = container ? container.scrollLeft : 0;
-    const savedActiveIndex = this.activeEventIndex;
-    
-    container.innerHTML = '';
-    this.eventElements = [];
-    
-    if (!history || history.length === 0) {
-      container.innerHTML = '<span class="event">No events yet</span>';
-      return;
-    }
-    
-    const events = history.length > this.MAX_EVENTS 
-      ? history.slice(-this.MAX_EVENTS) 
-      : history;
-    
-    if (history.length > this.MAX_EVENTS) {
-      const countEl = document.createElement('span');
-      countEl.className = 'event count-info';
-      countEl.textContent = `📊 Showing last ${this.MAX_EVENTS} of ${history.length} events`;
-      container.appendChild(countEl);
-    }
-    
-    for (let i = 0; i < events.length; i++) {
-      const item = events[i];
-      const el = document.createElement('span');
-      el.className = 'event';
-      el.dataset.index = i;
-      el.dataset.globalIndex = history.length - events.length + i;
-      
-      const time = this.formatTimestamp(item.timestamp);
-      const dest = item.destination || item.state || 'unknown';
-      const conf = Math.round((item.confidence || 0) * 100);
-      const icon = item.state === 'landed' ? '🛬' : 
-                   item.state === 'in_flight' ? '🛫' : 
-                   item.state === 'grounded' || item.state === 'parked' ? '🅿️' : '❓';
-      
-      el.innerHTML = `<span class="time">${time}</span> ${icon} → <span class="dest">${dest}</span> <span class="conf">(${conf}%)</span>`;
-      
-      el.addEventListener('click', () => {
-        const globalIndex = parseInt(el.dataset.globalIndex, 10);
-        this.isUserBrowsingHistory = true;
-        this.jumpToEvent(globalIndex, 'click');
-      });
-      
-      container.appendChild(el);
-      this.eventElements.push(el);
-    }
-    
-    const shouldPreserveActive = options.preserveActive && savedActiveIndex >= 0;
-    const isLiveMode = this.isLiveMode && !this.isUserBrowsingHistory;
-    
-    if (shouldPreserveActive) {
-      this.highlightActiveEvent(savedActiveIndex);
-    } else if (isLiveMode && this.eventElements.length > 0) {
-      const lastIndex = this.eventElements.length - 1;
-      this.eventElements[lastIndex].classList.add('active');
-      this.activeEventIndex = history.length - 1;
-    } else if (this.eventElements.length > 0) {
-      const lastIndex = this.eventElements.length - 1;
-      this.eventElements[lastIndex].classList.add('active');
-    }
-    
-    const shouldPreserveScroll = options.preserveScroll && savedScrollLeft > 0;
-    
-    if (shouldPreserveScroll) {
-      container.scrollLeft = savedScrollLeft;
-    } else if (isLiveMode) {
-      container.scrollLeft = container.scrollWidth;
-    } else {
-      if (this.activeEventIndex >= 0) {
-        this.scrollToActiveEvent(this.activeEventIndex);
-      } else {
-        container.scrollLeft = container.scrollWidth;
-      }
-    }
-  }
-
-  // =============================================
-  // 12. RENDER CARDS (syncs with timeline)
+  // 11. RENDER CARDS
   // =============================================
   renderCards(history, options = {}) {
     const container = this.dom.cardsTrack;
@@ -822,23 +699,28 @@ class ElonTracker {
       this.cardElements.push(card);
     }
     
-    // Sync active state with timeline
+    // Restore active state
     const shouldPreserveActive = options.preserveActive && savedActiveIndex >= 0;
     const isLiveMode = this.isLiveMode && !this.isUserBrowsingHistory;
     
-    if (shouldPreserveActive) {
+    if (shouldPreserveActive && savedActiveIndex < this.historyData.length) {
       this.highlightActiveCard(savedActiveIndex);
     } else if (isLiveMode && this.cardElements.length > 0) {
       const lastIndex = this.cardElements.length - 1;
       this.cardElements[lastIndex].classList.add('active');
+      this.activeEventIndex = history.length - 1;
     } else if (this.cardElements.length > 0 && this.activeEventIndex >= 0) {
       this.highlightActiveCard(this.activeEventIndex);
+    } else if (this.cardElements.length > 0) {
+      const lastIndex = this.cardElements.length - 1;
+      this.cardElements[lastIndex].classList.add('active');
+      this.activeEventIndex = history.length - 1;
     }
     
     // Restore scroll
     const shouldPreserveScroll = options.preserveScroll && savedScrollLeft > 0;
     
-    if (shouldPreserveScroll) {
+    if (shouldPreserveScroll && savedScrollLeft <= container.scrollWidth) {
       container.scrollLeft = savedScrollLeft;
     } else if (isLiveMode) {
       container.scrollLeft = container.scrollWidth;
@@ -850,7 +732,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 13. HELPER: Format Timestamp with Date
+  // 12. HELPER: Format Timestamp with Date
   // =============================================
   formatTimestamp(timestamp) {
     if (!timestamp) return 'Unknown';
@@ -873,7 +755,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 14. HELPER: Convert local index to global
+  // 13. HELPER: Convert local index to global
   // =============================================
   localToGlobal(localIndex) {
     const events = this.historyData.length > this.MAX_EVENTS 
@@ -883,9 +765,9 @@ class ElonTracker {
   }
 
   // =============================================
-  // 15. JUMP TO EVENT (✅ FIXED: scrolls partner track)
+  // 14. JUMP TO EVENT
   // =============================================
-  jumpToEvent(index, reason, source) {
+  jumpToEvent(index, reason) {
     if (index < 0 || index >= this.historyData.length) return;
     if (this.syncing) return;
     
@@ -909,48 +791,12 @@ class ElonTracker {
     this.updateMap();
     this.updateStatusCard();
     
-    this.highlightActiveEvent(index);
     this.highlightActiveCard(index);
-    
-    // ✅ FIX: Scroll the partner track based on source
-    if (reason === 'scroll') {
-      // User scrolled one track → scroll the OTHER track
-      if (source === 'timeline') {
-        this.scrollToActiveCard(index);
-      } else if (source === 'cards') {
-        this.scrollToActiveEvent(index);
-      } else {
-        // Fallback: scroll both
-        this.scrollToActiveEvent(index);
-        this.scrollToActiveCard(index);
-      }
-    } else {
-      // Slider or click → scroll both
-      this.scrollToActiveEvent(index);
-      this.scrollToActiveCard(index);
-    }
+    this.scrollToActiveCard(index);
   }
 
   // =============================================
-  // 16. HIGHLIGHT ACTIVE EVENT (timeline)
-  // =============================================
-  highlightActiveEvent(index) {
-    this.clearActiveHighlight();
-    
-    const events = this.historyData.length > this.MAX_EVENTS 
-      ? this.historyData.slice(-this.MAX_EVENTS) 
-      : this.historyData;
-    
-    const localIndex = index - (this.historyData.length - events.length);
-    
-    if (localIndex >= 0 && localIndex < this.eventElements.length) {
-      this.eventElements[localIndex].classList.add('active');
-      this.activeEventIndex = index;
-    }
-  }
-
-  // =============================================
-  // 17. HIGHLIGHT ACTIVE CARD
+  // 15. HIGHLIGHT ACTIVE CARD
   // =============================================
   highlightActiveCard(index) {
     this.clearActiveCardHighlight();
@@ -963,35 +809,12 @@ class ElonTracker {
     
     if (localIndex >= 0 && localIndex < this.cardElements.length) {
       this.cardElements[localIndex].classList.add('active');
+      this.activeEventIndex = index;
     }
   }
 
   // =============================================
-  // 18. SCROLL TO ACTIVE EVENT (timeline)
-  // =============================================
-  scrollToActiveEvent(index) {
-    const events = this.historyData.length > this.MAX_EVENTS 
-      ? this.historyData.slice(-this.MAX_EVENTS) 
-      : this.historyData;
-    
-    const localIndex = index - (this.historyData.length - events.length);
-    
-    if (localIndex >= 0 && localIndex < this.eventElements.length) {
-      const el = this.eventElements[localIndex];
-      const container = this.dom.timelineEvents;
-      
-      this.syncing = true;
-      const scrollOffset = el.offsetLeft - (container.clientWidth / 2) + (el.offsetWidth / 2);
-      container.scrollTo({
-        left: Math.max(0, scrollOffset),
-        behavior: 'smooth'
-      });
-      setTimeout(() => { this.syncing = false; }, 200);
-    }
-  }
-
-  // =============================================
-  // 19. SCROLL TO ACTIVE CARD
+  // 16. SCROLL TO ACTIVE CARD
   // =============================================
   scrollToActiveCard(index) {
     const events = this.historyData.length > this.MAX_EVENTS 
@@ -1014,12 +837,6 @@ class ElonTracker {
     }
   }
 
-  clearActiveHighlight() {
-    if (this.eventElements) {
-      this.eventElements.forEach(el => el.classList.remove('active'));
-    }
-  }
-
   clearActiveCardHighlight() {
     if (this.cardElements) {
       this.cardElements.forEach(el => el.classList.remove('active'));
@@ -1027,7 +844,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 20. GO BACK TO LIVE MODE
+  // 17. GO BACK TO LIVE MODE
   // =============================================
   goLive() {
     this.isLiveMode = true;
@@ -1035,7 +852,6 @@ class ElonTracker {
     this.activeEventIndex = -1;
     this.dom.sliderMode.textContent = '🔴 LIVE';
     this.dom.sliderMode.className = 'live-label';
-    this.clearActiveHighlight();
     this.clearActiveCardHighlight();
     this.loadCurrent();
     this.dom.timeSlider.value = 100;
@@ -1043,7 +859,7 @@ class ElonTracker {
 }
 
 // =============================================
-// 21. START
+// 18. START
 // =============================================
 document.addEventListener('DOMContentLoaded', () => {
   const tracker = new ElonTracker();
