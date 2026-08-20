@@ -606,6 +606,7 @@ class ElonTracker {
       'in_flight': { icon: '🛫', color: 'in_flight', label: '🟠 IN FLIGHT' },
       'grounded': { icon: '🅿️', color: 'grounded', label: '🔵 GROUNDED' },
       'parked': { icon: '🅿️', color: 'grounded', label: '🔵 PARKED' },
+      'no_signal': { icon: '📡', color: 'unknown', label: '⚫ NO SIGNAL' },
       'unknown': { icon: '❓', color: 'unknown', label: '⚫ UNKNOWN' }
     };
     
@@ -650,8 +651,10 @@ class ElonTracker {
 
     if (d.dataMeta) {
       const age = meta.flightAge != null ? `${meta.flightAge}s` : (data.observed_age != null ? `${data.observed_age}s` : '—');
-      const source = meta.inferenceSource || 'none';
-      const metaText = `Source: ${source} · Age: ${age}${meta.isStale ? ' · STALE' : ''}`;
+      const source = meta.inferenceSource || data.prediction_type || 'none';
+      const phase = data.phase || data.state || '—';
+      const hypo = data.hypothesis_type ? ` · hypo: ${data.hypothesis_type}` : '';
+      const metaText = `${phase} · ${source} · age ${age}${meta.isStale ? ' · STALE' : ''}${hypo}`;
       if (d.dataMeta.textContent !== metaText) {
         d.dataMeta.textContent = metaText;
       }
@@ -682,13 +685,14 @@ class ElonTracker {
     d.confidenceFill.style.width = `${pct}%`;
     
     const reasoningEl = d.reasoning;
-    if (data.reasoning && data.reasoning.length > 0) {
-      const newReasoning = data.reasoning.map(r => `<li>${r}</li>`).join('');
-      if (reasoningEl.innerHTML !== newReasoning) {
-        reasoningEl.innerHTML = newReasoning;
-      }
-    } else if (reasoningEl.innerHTML !== '<li>No reasoning available</li>') {
-      reasoningEl.innerHTML = '<li>No reasoning available</li>';
+    const statusLine = data.status_message ? [`${data.status_message}`] : [];
+    const reasons = [
+      ...statusLine,
+      ...((data.reasoning && data.reasoning.length) ? data.reasoning : ['No reasoning available']),
+    ];
+    const newReasoning = reasons.map(r => `<li>${r}</li>`).join('');
+    if (reasoningEl.innerHTML !== newReasoning) {
+      reasoningEl.innerHTML = newReasoning;
     }
     
     const tsText = data.timestamp ? `⏰ ${this.formatTimestamp(data.timestamp)}` : '—';

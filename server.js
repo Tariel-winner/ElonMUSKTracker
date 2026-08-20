@@ -29,6 +29,9 @@ app.get('/api/current', async (req, res) => {
       const response = {
         // Inference data (what we think is happening)
         state: state.latestConclusion?.state || 'unknown',
+        phase: state.latestConclusion?.phase || state.latestConclusion?.state || 'unknown',
+        status_message: state.latestConclusion?.status_message || null,
+        hypothesis_type: state.latestConclusion?.hypothesis_type || null,
         current_location: state.latestConclusion?.current_location || 'Unknown',
         destination: state.latestConclusion?.destination || 'Unknown',
         confidence: state.latestConclusion?.confidence || 0,
@@ -51,7 +54,8 @@ app.get('/api/current', async (req, res) => {
           inferenceSource: state.inferenceSource || 'none',
           inferenceConfidence: state.inferenceConfidence || 0,
           lastUpdated: state.lastUpdated || null,
-          cacheVersion: '2.0'
+          cacheVersion: '2.0',
+          phase: state.latestConclusion?.phase || null,
         }
       };
       return res.json(response);

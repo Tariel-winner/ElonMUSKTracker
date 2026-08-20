@@ -291,7 +291,16 @@
       "use_for": ["grounded"],
       "coord_quality": "approximate",
       "linked_airports": ["KMIA", "KFLL"],
-      "timezone": "America/New_York"
+      "timezone": "America/New_York",
+      "requires_schedule": true,
+      "active": false,
+      "active_windows": [
+        {
+          "start": "2026-05-01",
+          "end": "2026-05-05",
+          "label": "Example F1 weekend — edit dates when real"
+        }
+      ]
     },
     {
       "id": "las_vegas_ufc",
@@ -306,7 +315,10 @@
       "use_for": ["grounded"],
       "coord_quality": "approximate",
       "linked_airports": ["KLAS"],
-      "timezone": "America/Los_Angeles"
+      "timezone": "America/Los_Angeles",
+      "requires_schedule": true,
+      "active": false,
+      "active_windows": []
     },
     {
       "id": "boca_chica",

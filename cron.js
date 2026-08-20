@@ -3,9 +3,9 @@ const fs = require('fs');
 const db = require('./db');
 const { cache, updateObservation, updateInference, clearInference, getCurrentState } = require('./memory-cache');
 const { generateConclusion } = require('./ai-correlator');
-const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
-const { askDeepSeek } = require('./deepseek-client');
+// location-inference / DeepSeek kept available for optional study experiments,
+// but no_signal path no longer invents destinations without ADS-B.
 
 // --- CONFIGURATION ---
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3001';
@@ -17,9 +17,6 @@ const MAX_HEADING_ANGLE_DEG = 45;
 const MIN_CONFIDENCE_FOR_DESTINATION = 0.3;
 
 let railwayCache = null;
-let lastDeepSeekCallTime = 0;
-let lastDeepSeekResult = null;
-const DEEPSEEK_CACHE_TTL = 3600000;
 
 // =============================================
 // HELPERS
@@ -248,12 +245,10 @@ async function runCronJob() {
       const prev = cache.currentFlight;
       let trafficData = null;
 
-      // Reset DeepSeek cache on takeoff
+      // Takeoff / landing edges
       if (prev && prev.on_ground === 1 && flight.on_ground === 0) {
-        lastDeepSeekCallTime = 0;
-        lastDeepSeekResult = null;
-        clearInference(); // ✅ Use helper
-        console.log('[CRON] Jet took off - DeepSeek cache reset.');
+        clearInference();
+        console.log('[CRON] Jet took off.');
       }
 
       // Detect landing
@@ -261,11 +256,7 @@ async function runCronJob() {
         cache.landingDetected = true;
         cache.lastLandingTime = now;
         console.log('[CRON] LANDING DETECTED at', flight.lat, flight.lon);
-
-        lastDeepSeekCallTime = 0;
-        lastDeepSeekResult = null;
-        clearInference(); // ✅ Use helper
-        console.log('[CRON] Landing detected - DeepSeek cache reset.');
+        clearInference();
 
         try {
           const wazeUrl = `https://www.waze.com/row-rtserver/web/TGeoRSS?tk=0&format=JSON&lon=${flight.lon}&lat=${flight.lat}&zoom=12`;
@@ -313,42 +304,63 @@ async function runCronJob() {
         vert_rate: flight.vert_rate || 0,
       }, trafficData);
 
-      // --- Heading prediction ---
-      if (conclusion.destination === 'Unknown' && isValidHeading(heading)) {
+      // --- Heading prediction (only while airborne and moving) ---
+      const speed = flight.gs || 0;
+      const isAirborneMoving = !flight.on_ground && speed > 50;
+
+      if (
+        conclusion.destination === 'Unknown' &&
+        isAirborneMoving &&
+        isValidHeading(heading)
+      ) {
         const prediction = predictDestinationByHeading(flight.lat, flight.lon, heading);
         if (prediction) {
           const distance = haversine(flight.lat, flight.lon, prediction.lat, prediction.lng);
           if (distance < 200) {
             conclusion.destination = prediction.name;
-            conclusion.confidence = Math.max(conclusion.confidence, 0.25);
-            conclusion.reasoning.push(`Heading ${heading.toFixed(1)}° points toward ${prediction.name} (${distance.toFixed(0)} miles).`);
+            conclusion.confidence = Math.max(conclusion.confidence, 0.35);
+            conclusion.hypothesis_type = 'heading';
+            conclusion.reasoning.push(
+              `Heading ${heading.toFixed(1)}° → ${prediction.name} (${distance.toFixed(0)} mi) [hypothesis].`
+            );
             console.log(`[CRON] Heading ${heading.toFixed(1)}° → ${prediction.name} (${distance.toFixed(0)} mi)`);
           }
         }
       }
 
-      // --- Nearest property fallback ---
-      if (conclusion.destination === 'Unknown') {
-        const useCase = flight.on_ground ? 'grounded' : 'in_flight';
-        const nearest = findNearestProperty(flight.lat, flight.lon, MAX_PROPERTY_DISTANCE_MILES, useCase);
+      // --- Nearest place only when ON GROUND (landed), not while flying ---
+      if (conclusion.destination === 'Unknown' && flight.on_ground) {
+        const nearest = findNearestProperty(flight.lat, flight.lon, MAX_PROPERTY_DISTANCE_MILES, 'grounded');
         if (nearest) {
           const dist = haversine(flight.lat, flight.lon, nearest.lat, nearest.lng);
           conclusion.destination = nearest.name;
           conclusion.confidence = Math.max(conclusion.confidence, 0.32);
-          conclusion.reasoning.push(`Nearest property: ${nearest.name} (${dist.toFixed(0)} miles).`);
+          conclusion.hypothesis_type = 'nearest_on_ground';
+          conclusion.reasoning.push(
+            `On ground near ${nearest.name} (${dist.toFixed(0)} mi) [hypothesis].`
+          );
           console.log(`[CRON] Nearest property: ${nearest.name} (${dist.toFixed(0)} mi)`);
         } else {
           conclusion.destination = 'Unknown';
           conclusion.confidence = 0;
-          conclusion.reasoning.push('No nearby properties found.');
+          conclusion.reasoning.push('On ground — no known place within radius.');
         }
       }
 
       if (conclusion.confidence < MIN_CONFIDENCE_FOR_DESTINATION) {
         conclusion.destination = 'Unknown';
         conclusion.confidence = 0;
+        conclusion.hypothesis_type = null;
       }
 
+      conclusion.phase = flight.on_ground ? 'landed' : 'in_flight';
+      conclusion.status_message = flight.on_ground
+        ? (conclusion.destination !== 'Unknown'
+          ? 'Aircraft on ground — nearby place is a hypothesis only.'
+          : 'Aircraft on ground — no strong place match.')
+        : (conclusion.destination !== 'Unknown'
+          ? 'In flight — destination is a heading hypothesis only.'
+          : 'In flight — tracking position; destination unknown.');
       conclusion.data_source = dataSource;
       conclusion.from_cache = fromCache || isUsingCachedFlight;
 
@@ -387,127 +399,40 @@ async function runCronJob() {
       console.log(`[CRON] Data source: ${dataSource}${fromCache ? ' (cached)' : ''}`);
     }
 
-    // --- 4. IF JET IS NOT FLYING (Ground Inference) ---
+    // --- 4. NO AIRCRAFT SIGNAL — honest, no invented destination ---
     else {
-      console.log('[CRON] Jet not found - using ground inference.');
+      console.log('[CRON] Jet not found — returning no_signal (no destination guess).');
 
-      // ✅ Use the new cache structure
-      const lastKnown = cache.lastObservedPosition || {
-        lat: 34.0882, 
-        lng: -118.4420,
-        locationName: 'Unknown (no data)',
-        timestamp: new Date().toISOString()
+      const lastKnown = cache.lastObservedPosition;
+      const ageSec = lastKnown?.timestamp
+        ? Math.round((Date.now() - new Date(lastKnown.timestamp).getTime()) / 1000)
+        : null;
+
+      const conclusion = {
+        state: 'no_signal',
+        phase: 'no_signal',
+        current_location: lastKnown
+          ? `Last ADS-B: ${Number(lastKnown.lat).toFixed(4)}, ${Number(lastKnown.lng).toFixed(4)}`
+          : 'No ADS-B observation yet',
+        destination: 'Unknown',
+        confidence: 0,
+        hypothesis_type: null,
+        status_message: lastKnown
+          ? 'Aircraft not in current feed — showing last observed position only. Destination unknown.'
+          : 'No aircraft data — waiting for ADS-B.',
+        reasoning: [
+          'No live aircraft state in bridge response.',
+          lastKnown
+            ? `Last observation age: ${ageSec != null ? ageSec + 's' : 'unknown'}.`
+            : 'No prior observation in memory.',
+          'Skipping AI/person guess — not enough evidence.',
+        ],
+        prediction_type: 'no_signal',
+        timestamp: now,
+        data_source: dataSource,
+        from_cache: true,
       };
 
-      const nowMs = Date.now();
-      
-      const hasValidCache = lastDeepSeekResult !== null && 
-                            lastDeepSeekResult.destination !== 'Unknown' &&
-                            (nowMs - lastDeepSeekCallTime) < DEEPSEEK_CACHE_TTL;
-
-      let conclusion;
-
-      if (hasValidCache) {
-        console.log('[CRON] Using cached DeepSeek result.');
-        conclusion = {
-          ...lastDeepSeekResult,
-          timestamp: now,
-          prediction_type: 'grounded_inference_cached',
-          data_source: dataSource,
-          from_cache: fromCache
-        };
-      } else {
-        console.log('[CRON] Calling DeepSeek API...');
-
-        const prompt = `
-          You are an expert analyst tracking Elon Musk.
-          
-          CURRENT CONTEXT:
-          - Time: ${new Date().toLocaleString()}
-          - Day: ${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][new Date().getDay()]}
-          - Hour: ${new Date().getHours()}:00
-          
-          LAST KNOWN LOCATION:
-          - Name: ${lastKnown.locationName || 'Unknown'}
-          - Coordinates: ${lastKnown.lat}, ${lastKnown.lng}
-          
-          KNOWN PROPERTIES:
-          ${JSON.stringify(staticData, null, 2)}
-          
-          TASK:
-          Based on the time of day, day of week, and last known location, where is Elon Musk most likely RIGHT NOW?
-          
-          Return ONLY a JSON object with:
-          - "destination": the most likely location name
-          - "confidence": a number between 0 and 1
-          - "reasoning": a list of 2-3 sentences explaining your logic
-        `;
-
-        const deepSeekResponse = await askDeepSeek(prompt);
-        
-        if (deepSeekResponse) {
-          try {
-            const aiResult = JSON.parse(deepSeekResponse);
-            conclusion = {
-              state: 'grounded',
-              current_location: lastKnown.locationName || 'Unknown',
-              destination: aiResult.destination || 'Unknown',
-              confidence: aiResult.confidence || 0.3,
-              reasoning: Array.isArray(aiResult.reasoning) ? aiResult.reasoning : [aiResult.reasoning || 'AI analysis complete'],
-              prediction_type: 'grounded_inference_deepseek',
-              timestamp: now,
-              data_source: dataSource,
-              from_cache: fromCache
-            };
-            lastDeepSeekResult = conclusion;
-            lastDeepSeekCallTime = nowMs;
-            console.log('[DEEPSEEK] AI analysis completed and cached.');
-          } catch (e) {
-            console.log('[DEEPSEEK] Parse error, using raw response');
-            conclusion = {
-              state: 'grounded',
-              current_location: lastKnown.locationName || 'Unknown',
-              destination: 'Unknown',
-              confidence: 0.3,
-              reasoning: [deepSeekResponse],
-              prediction_type: 'grounded_inference_deepseek_raw',
-              timestamp: now,
-              data_source: dataSource,
-              from_cache: fromCache
-            };
-          }
-        } else {
-          console.log('[DEEPSEEK] API failed, falling back to rule-based logic.');
-          const fallback = inferLocationWhenGrounded(lastKnown, staticData, cache, null);
-          conclusion = {
-            state: 'grounded',
-            current_location: lastKnown.locationName || 'Unknown',
-            destination: fallback.destination,
-            confidence: fallback.confidence,
-            reasoning: fallback.reasoning,
-            prediction_type: 'grounded_inference_fallback',
-            timestamp: now,
-            data_source: 'fallback',
-            from_cache: true
-          };
-        }
-      }
-
-      // --- Final fallback ---
-      if (conclusion.destination === 'Unknown' || conclusion.destination.includes('(historical pattern)')) {
-        const nearest = findNearestProperty(lastKnown.lat, lastKnown.lng, MAX_PROPERTY_DISTANCE_MILES, 'grounded');
-        if (nearest) {
-          conclusion.destination = nearest.name;
-          conclusion.confidence = Math.max(conclusion.confidence, 0.15);
-          conclusion.reasoning.push(`Nearest property: ${nearest.name} (within ${MAX_PROPERTY_DISTANCE_MILES} miles).`);
-        } else {
-          conclusion.destination = 'Unknown';
-          conclusion.confidence = 0;
-          conclusion.reasoning.push('No nearby properties within reasonable distance.');
-        }
-      }
-
-      // --- Save conclusion ---
       db.run(
         `INSERT INTO ai_conclusions (timestamp, state, current_location, destination, confidence, reasoning, prediction_type, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -515,10 +440,8 @@ async function runCronJob() {
         (err) => { if (err) console.error('[DB] Insert conclusion error:', err); }
       );
 
-      // ✅ Update inference (GUESS)
       updateInference(conclusion);
-
-      console.log(`[CRON] Ground inference: ${conclusion.destination} (${Math.round(conclusion.confidence * 100)}%)`);
+      console.log('[CRON] no_signal — destination forced Unknown');
     }
 
   } catch (err) {
