@@ -1,11 +1,14 @@
 const OpenAI = require('openai');
 
-// Initialize DeepSeek client (OpenAI-compatible)
 const client = new OpenAI({
   apiKey: process.env.DEEPSEEK_API_KEY || 'YOUR_DEEPSEEK_API_KEY_HERE',
   baseURL: 'https://api.deepseek.com/v1',
 });
 
+/**
+ * Ask DeepSeek for a structured hypothesis.
+ * Returns raw message content (expect JSON) or null.
+ */
 async function askDeepSeek(prompt) {
   try {
     const response = await client.chat.completions.create({
@@ -13,14 +16,19 @@ async function askDeepSeek(prompt) {
       messages: [
         {
           role: 'system',
-          content: 'You are an expert intelligence analyst tracking Elon Musk. Combine flight data, time patterns, news, and property data to infer his current location.'
+          content:
+            'You rank location HYPOTHESES for a study dashboard. ' +
+            'You do not have live GPS. Prefer Unknown when evidence is weak. ' +
+            'Only pick from the provided candidate place names. ' +
+            'Return ONLY valid JSON: {"destination":"Name or Unknown","confidence":0-1,"reasoning":["..."]}. ' +
+            'Cap confidence at 0.45 unless last ADS-B is very near a candidate.',
         },
-        { role: 'user', content: prompt }
+        { role: 'user', content: prompt },
       ],
-      temperature: 0.3,
-      max_tokens: 500,
+      temperature: 0.2,
+      max_tokens: 400,
     });
-    
+
     return response.choices[0].message.content;
   } catch (error) {
     console.error('[DEEPSEEK] Error:', error.message);

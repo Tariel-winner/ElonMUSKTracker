@@ -3,9 +3,9 @@ const fs = require('fs');
 const db = require('./db');
 const { cache, updateObservation, updateInference, clearInference, getCurrentState } = require('./memory-cache');
 const { generateConclusion } = require('./ai-correlator');
+const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
-// location-inference / DeepSeek kept available for optional study experiments,
-// but no_signal path no longer invents destinations without ADS-B.
+const { askDeepSeek } = require('./deepseek-client');
 
 // --- CONFIGURATION ---
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3001';
@@ -15,8 +15,60 @@ const RAILWAY_CACHE_FILE = '/tmp/railway_cache.json';
 const MAX_PROPERTY_DISTANCE_MILES = 50;
 const MAX_HEADING_ANGLE_DEG = 45;
 const MIN_CONFIDENCE_FOR_DESTINATION = 0.3;
+const AI_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour — keeps ~24 calls/day if always no_signal
+const AI_MAX_CALLS_PER_DAY = 40;
 
 let railwayCache = null;
+let lastAiResult = null;
+let lastAiCallTime = 0;
+let lastAiCacheKey = null;
+let aiCallsToday = 0;
+let aiCallsDayKey = null;
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10); // UTC day
+}
+
+function canCallAi() {
+  const day = todayKey();
+  if (aiCallsDayKey !== day) {
+    aiCallsDayKey = day;
+    aiCallsToday = 0;
+  }
+  return aiCallsToday < AI_MAX_CALLS_PER_DAY;
+}
+
+function recordAiCall() {
+  const day = todayKey();
+  if (aiCallsDayKey !== day) {
+    aiCallsDayKey = day;
+    aiCallsToday = 0;
+  }
+  aiCallsToday += 1;
+  console.log(`[DEEPSEEK] Calls today: ${aiCallsToday}/${AI_MAX_CALLS_PER_DAY}`);
+}
+
+function buildAiCacheKey(lastKnown) {
+  if (!lastKnown) return 'none';
+  const lat = Number(lastKnown.lat).toFixed(2);
+  const lng = Number(lastKnown.lng).toFixed(2);
+  return `${lat},${lng}`;
+}
+
+function extractJsonObject(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch (e) {
+      return null;
+    }
+  }
+}
 
 // =============================================
 // HELPERS
@@ -245,9 +297,11 @@ async function runCronJob() {
       const prev = cache.currentFlight;
       let trafficData = null;
 
-      // Takeoff / landing edges
+      // Takeoff / landing edges — invalidate AI cache when flight returns
       if (prev && prev.on_ground === 1 && flight.on_ground === 0) {
         clearInference();
+        lastAiResult = null;
+        lastAiCacheKey = null;
         console.log('[CRON] Jet took off.');
       }
 
@@ -257,6 +311,8 @@ async function runCronJob() {
         cache.lastLandingTime = now;
         console.log('[CRON] LANDING DETECTED at', flight.lat, flight.lon);
         clearInference();
+        lastAiResult = null;
+        lastAiCacheKey = null;
 
         try {
           const wazeUrl = `https://www.waze.com/row-rtserver/web/TGeoRSS?tk=0&format=JSON&lon=${flight.lon}&lat=${flight.lat}&zoom=12`;
@@ -399,16 +455,16 @@ async function runCronJob() {
       console.log(`[CRON] Data source: ${dataSource}${fromCache ? ' (cached)' : ''}`);
     }
 
-    // --- 4. NO AIRCRAFT SIGNAL — honest, no invented destination ---
+    // --- 4. NO AIRCRAFT SIGNAL — last ADS-B + optional cached AI approximation ---
     else {
-      console.log('[CRON] Jet not found — returning no_signal (no destination guess).');
+      console.log('[CRON] Jet not found — no_signal + optional AI hypothesis.');
 
       const lastKnown = cache.lastObservedPosition;
       const ageSec = lastKnown?.timestamp
         ? Math.round((Date.now() - new Date(lastKnown.timestamp).getTime()) / 1000)
         : null;
 
-      const conclusion = {
+      const base = {
         state: 'no_signal',
         phase: 'no_signal',
         current_location: lastKnown
@@ -418,14 +474,13 @@ async function runCronJob() {
         confidence: 0,
         hypothesis_type: null,
         status_message: lastKnown
-          ? 'Aircraft not in current feed — showing last observed position only. Destination unknown.'
+          ? 'Aircraft not in feed — pin is last ADS-B. Any destination below is an unverified approximation.'
           : 'No aircraft data — waiting for ADS-B.',
         reasoning: [
           'No live aircraft state in bridge response.',
           lastKnown
             ? `Last observation age: ${ageSec != null ? ageSec + 's' : 'unknown'}.`
             : 'No prior observation in memory.',
-          'Skipping AI/person guess — not enough evidence.',
         ],
         prediction_type: 'no_signal',
         timestamp: now,
@@ -433,6 +488,126 @@ async function runCronJob() {
         from_cache: true,
       };
 
+      let conclusion = { ...base };
+
+      // Rules prior (nearby active place only) — weak, no AI yet
+      if (lastKnown && Number.isFinite(lastKnown.lat) && Number.isFinite(lastKnown.lng)) {
+        const rules = inferLocationWhenGrounded(
+          { lat: lastKnown.lat, lng: lastKnown.lng, locationName: base.current_location },
+          staticData,
+          cache,
+          null
+        );
+        if (rules.destination && rules.destination !== 'Unknown' && rules.confidence >= 0.25) {
+          conclusion.destination = rules.destination;
+          conclusion.confidence = Math.min(rules.confidence, 0.4);
+          conclusion.hypothesis_type = 'rules_no_signal';
+          conclusion.prediction_type = 'no_signal_rules';
+          conclusion.reasoning = [...base.reasoning, ...rules.reasoning];
+        }
+      }
+
+      // Budgeted DeepSeek: 1h cache per lastKnown cell, max 40/day
+      const cacheKey = buildAiCacheKey(lastKnown);
+      const nowMs = Date.now();
+      const aiCacheFresh =
+        lastAiResult &&
+        lastAiCacheKey === cacheKey &&
+        nowMs - lastAiCallTime < AI_CACHE_TTL_MS;
+
+      if (aiCacheFresh) {
+        console.log('[DEEPSEEK] Using 1h cached hypothesis.');
+        conclusion = {
+          ...conclusion,
+          ...lastAiResult,
+          current_location: base.current_location,
+          phase: 'no_signal',
+          state: 'no_signal',
+          status_message: base.status_message,
+          timestamp: now,
+          prediction_type: 'no_signal_ai_cached',
+          hypothesis_type: 'ai_unverified',
+          from_cache: true,
+          ai_calls_today: aiCallsToday,
+        };
+      } else if (lastKnown && canCallAi()) {
+        const candidates = staticData
+          .getPlacesFor('grounded')
+          .slice(0, 25)
+          .map((p) => ({
+            name: p.name,
+            type: p.type || p.category,
+            lat: p.lat,
+            lng: p.lng,
+            weight: p.weight,
+          }));
+
+        const prompt = `
+STUDY HYPOTHESIS (not live GPS).
+Last ADS-B: lat=${lastKnown.lat}, lng=${lastKnown.lng}, age_sec=${ageSec}
+UTC now: ${new Date().toISOString()}
+
+Candidates (pick ONE name or Unknown):
+${JSON.stringify(candidates, null, 2)}
+
+Rules prior: ${conclusion.destination} (conf ${conclusion.confidence})
+
+Task: If last ADS-B is near a candidate, you may pick it with confidence <= 0.45.
+If unsure, destination must be "Unknown" and confidence 0.
+Return ONLY JSON.
+`;
+
+        console.log('[DEEPSEEK] Calling API for no_signal hypothesis...');
+        const raw = await askDeepSeek(prompt);
+        recordAiCall();
+        lastAiCallTime = nowMs;
+        lastAiCacheKey = cacheKey;
+
+        const aiResult = extractJsonObject(raw);
+        if (aiResult) {
+          let dest = aiResult.destination || 'Unknown';
+          let conf = Number(aiResult.confidence) || 0;
+          const allowed = new Set(candidates.map((c) => c.name).concat(['Unknown']));
+          if (!allowed.has(dest)) {
+            dest = 'Unknown';
+            conf = 0;
+          }
+          conf = Math.min(conf, 0.45);
+
+          const aiConclusion = {
+            destination: dest,
+            confidence: dest === 'Unknown' ? 0 : conf,
+            reasoning: [
+              ...base.reasoning,
+              ...(Array.isArray(aiResult.reasoning) ? aiResult.reasoning : [String(aiResult.reasoning || 'AI hypothesis')]),
+              'AI approximation only — not an observation.',
+            ],
+            prediction_type: 'no_signal_ai',
+            hypothesis_type: 'ai_unverified',
+          };
+          lastAiResult = aiConclusion;
+          conclusion = {
+            ...conclusion,
+            ...aiConclusion,
+            current_location: base.current_location,
+            phase: 'no_signal',
+            state: 'no_signal',
+            status_message: base.status_message,
+            timestamp: now,
+            data_source: dataSource,
+            from_cache: false,
+            ai_calls_today: aiCallsToday,
+          };
+          console.log(`[DEEPSEEK] Hypothesis: ${dest} (${Math.round(conf * 100)}%)`);
+        } else {
+          console.log('[DEEPSEEK] Parse failed — keeping rules/Unknown.');
+        }
+      } else if (!canCallAi()) {
+        conclusion.reasoning.push(`AI daily budget exhausted (${AI_MAX_CALLS_PER_DAY}/day).`);
+        console.log('[DEEPSEEK] Daily budget hit — skip call.');
+      }
+
+      // Never promote AI into observation
       db.run(
         `INSERT INTO ai_conclusions (timestamp, state, current_location, destination, confidence, reasoning, prediction_type, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -441,7 +616,9 @@ async function runCronJob() {
       );
 
       updateInference(conclusion);
-      console.log('[CRON] no_signal — destination forced Unknown');
+      console.log(
+        `[CRON] no_signal dest=${conclusion.destination} conf=${conclusion.confidence} type=${conclusion.hypothesis_type || 'none'}`
+      );
     }
 
   } catch (err) {

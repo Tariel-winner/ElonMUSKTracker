@@ -510,9 +510,11 @@ class ElonTracker {
           fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-    } else if (data.state === 'grounded' || data.state === 'parked') {
+    } else if (data.state === 'grounded' || data.state === 'parked' || data.state === 'no_signal') {
+      const iconHtml = data.state === 'no_signal' ? '📡' : '🅿️';
+      const title = data.state === 'no_signal' ? 'NO SIGNAL (last ADS-B)' : 'GROUNDED';
       const parkedIcon = L.divIcon({
-        html: '🅿️',
+        html: iconHtml,
         className: 'parked-marker',
         iconSize: [30, 30],
         iconAnchor: [15, 15]
@@ -520,7 +522,7 @@ class ElonTracker {
       
       this.markers.plane = L.marker([lat, lng], { icon: parkedIcon })
         .addTo(this.map)
-        .bindPopup(`<b>🅿️ GROUNDED</b><br>Observed: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+        .bindPopup(`<b>${title}</b><br>Observed: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
       
       if (showDest) {
         const destCoords = this.getDestinationCoords(data.destination);
@@ -531,10 +533,11 @@ class ElonTracker {
             iconSize: [24, 24],
             iconAnchor: [12, 12]
           });
+          const hypo = data.hypothesis_type === 'ai_unverified' ? 'AI approx' : 'Guess';
           
           this.markers.destination = L.marker([destCoords.lat, destCoords.lng], { icon: destIcon })
             .addTo(this.map)
-            .bindPopup(`📍 Guess: ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
+            .bindPopup(`📍 ${hypo}: ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
           
           shouldFitBounds = true;
           fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
@@ -662,8 +665,10 @@ class ElonTracker {
     
     const destEl = d.destination;
     if (data.destination && data.destination !== 'Unknown') {
-      if (destEl.textContent !== data.destination) {
-        destEl.textContent = data.destination;
+      const prefix = (data.hypothesis_type === 'ai_unverified' || data.state === 'no_signal') ? '≈ ' : '';
+      const destText = `${prefix}${data.destination}`;
+      if (destEl.textContent !== destText) {
+        destEl.textContent = destText;
       }
       const color = data.confidence > 0.7 ? '#00ff88' : 
                     data.confidence > 0.3 ? '#ffaa00' : '#ff4444';
