@@ -24,14 +24,13 @@ class ElonTracker {
     this.userScrolling = false;
     this.scrollTimeout = null;
     this.MAX_EVENTS = 100;
+    this.pendingScrollJump = null;  // ✅ Debounce scroll jumps
+    this.isUserBrowsingHistory = false;  // ✅ Track if user is browsing
     
     // --- ZOOM FIX ---
-    this.userMovedMap = false;      // ✅ Track if user zoomed/panned
-    this.lastMapZoom = 4;           // Store last zoom level
-    this.lastMapCenter = null;      // Store last center
-    
-    // --- TIMELINE FIX ---
-    this.preserveScrollPosition = false;  // ✅ Don't reset scroll on soft poll
+    this.userMovedMap = false;
+    this.lastMapZoom = 4;
+    this.lastMapCenter = null;
   }
 
   // =============================================
@@ -93,16 +92,13 @@ class ElonTracker {
       maxZoom: 19,
     }).addTo(this.map);
     
-    // ✅ FIX: Track user interaction for zoom preservation
     this.map.on('zoomstart', () => {
       this.userMovedMap = true;
       this.lastMapZoom = this.map.getZoom();
-      console.log('🗺️ User zoomed — zoom preserved at:', this.lastMapZoom);
     });
     this.map.on('dragstart', () => {
       this.userMovedMap = true;
       this.lastMapCenter = this.map.getCenter();
-      console.log('🗺️ User panned — position preserved');
     });
     this.map.on('zoomend', () => {
       this.lastMapZoom = this.map.getZoom();
@@ -123,20 +119,7 @@ class ElonTracker {
       const rows = await res.json();
       
       if (soft) {
-        // ✅ FIX: Remember scroll position before appending
-        const container = this.dom.timelineEvents;
-        const savedScrollLeft = container ? container.scrollLeft : 0;
-        const savedActiveIndex = this.activeEventIndex;
-        
         this.appendNewHistory(rows);
-        
-        // ✅ FIX: Restore scroll position and active highlight
-        if (container && this.preserveScrollPosition) {
-          container.scrollLeft = savedScrollLeft;
-          if (savedActiveIndex >= 0) {
-            this.highlightActiveEvent(savedActiveIndex);
-          }
-        }
       } else {
         this.historyData = rows;
         this.renderTimeline(rows);
@@ -160,16 +143,13 @@ class ElonTracker {
       : rows;
     
     if (newEvents.length > 0) {
-      // ✅ FIX: Track if we're in live mode before appending
-      const wasLiveMode = this.isLiveMode;
-      const oldLength = this.historyData.length;
-      
+      const wasBrowsing = this.isUserBrowsingHistory;
       this.historyData.push(...newEvents);
       
       // ✅ FIX: Only re-render if we have new events
       this.renderTimeline(this.historyData, { 
-        preserveScroll: !wasLiveMode,
-        preserveActive: !wasLiveMode && this.activeEventIndex >= 0
+        preserveScroll: wasBrowsing,
+        preserveActive: wasBrowsing && this.activeEventIndex >= 0
       });
       
       console.log(`📜 Appended ${newEvents.length} new events`);
@@ -188,7 +168,7 @@ class ElonTracker {
       if (this.hasDataChanged(newData)) {
         this.currentData = newData;
         this.updateUI();
-        this.updateMap();   // ✅ Map updates with zoom preservation
+        this.updateMap();
         this.updateStatusCard();
       }
       
@@ -201,12 +181,8 @@ class ElonTracker {
     }
   }
 
-  // =============================================
-  // 3.5 CHECK IF DATA CHANGED (FIXED)
-  // =============================================
   hasDataChanged(newData) {
     if (!this.currentData) return true;
-    
     if (this.currentData.timestamp !== newData.timestamp) return true;
     
     const fields = ['state', 'destination', 'confidence', 'current_location', 'lat', 'lng'];
@@ -219,21 +195,19 @@ class ElonTracker {
   }
 
   // =============================================
-  // 4. POLLING (FIXED)
+  // 4. POLLING
   // =============================================
   startPolling() {
     this.pollingInterval = setInterval(() => {
       if (this.isLiveMode && !this.isUserInteracting) {
         this.refreshLive();
       }
-    }, 60000);
+    }, 10000);
   }
 
   async refreshLive() {
-    this.preserveScrollPosition = true;  // ✅ Don't reset scroll on soft poll
     await this.loadCurrent();
     await this.loadHistory({ soft: true });
-    this.preserveScrollPosition = false;
   }
 
   // =============================================
@@ -246,6 +220,8 @@ class ElonTracker {
       if (this.syncing) return;
       
       this.isUserInteracting = true;
+      this.isUserBrowsingHistory = true;  // ✅ User is browsing
+      
       const val = parseInt(e.target.value);
       this.lastSliderValue = val;
       
@@ -255,52 +231,62 @@ class ElonTracker {
       this.jumpToEvent(index, 'slider');
     });
     
+    // ✅ FIX: Don't auto-return to live after 3s - let user decide
     slider.addEventListener('mouseup', () => {
       this.isUserInteracting = false;
-      setTimeout(() => {
-        this.isLiveMode = true;
-        this.activeEventIndex = -1;
-        this.dom.sliderMode.textContent = '🔴 LIVE';
-        this.dom.sliderMode.className = 'live-label';
-        this.clearActiveHighlight();
-        this.loadCurrent();
-      }, 3000);
+      // User can click "LIVE" button or we keep showing selected
     });
   }
 
-  // Scroll sync listener (list → slider)
+  // ✅ FIX: Scroll sync listener with proper debounce
   setupScrollSync() {
     const list = this.dom.timelineEvents;
     if (!list) return;
+    
+    let scrollTimeout = null;
     
     list.addEventListener('scroll', () => {
       if (this.syncing) return;
       if (this.historyData.length === 0 || this.eventElements.length === 0) return;
       
-      this.userScrolling = true;
-      clearTimeout(this.scrollTimeout);
-      this.scrollTimeout = setTimeout(() => {
-        this.userScrolling = false;
-      }, 150);
-      
-      const container = list;
-      const centerX = container.scrollLeft + container.clientWidth / 2;
-      
-      let best = 0;
-      let bestDist = Infinity;
-      
-      this.eventElements.forEach((el, i) => {
-        const elCenter = el.offsetLeft + el.offsetWidth / 2;
-        const dist = Math.abs(elCenter - centerX);
-        if (dist < bestDist) {
-          bestDist = dist;
-          best = i;
-        }
-      });
-      
-      const globalIndex = this.localToGlobal(best);
-      this.jumpToEvent(globalIndex, 'scroll');
+      // ✅ FIX: Debounce scroll events
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        this.handleScrollSync();
+      }, 100);
     });
+  }
+
+  // ✅ FIX: Handle scroll sync with proper geometry
+  handleScrollSync() {
+    if (this.syncing) return;
+    if (this.historyData.length === 0 || this.eventElements.length === 0) return;
+    
+    const container = this.dom.timelineEvents;
+    if (!container) return;
+    
+    // ✅ FIX: Use getBoundingClientRect for accurate geometry
+    const cRect = container.getBoundingClientRect();
+    const centerX = cRect.left + cRect.width / 2;
+    
+    let best = 0;
+    let bestDist = Infinity;
+    
+    this.eventElements.forEach((el, i) => {
+      const elRect = el.getBoundingClientRect();
+      const elCenter = elRect.left + elRect.width / 2;
+      const dist = Math.abs(elCenter - centerX);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    });
+    
+    const globalIndex = this.localToGlobal(best);
+    if (globalIndex !== this.activeEventIndex) {
+      this.isUserBrowsingHistory = true;
+      this.jumpToEvent(globalIndex, 'scroll');
+    }
   }
 
   // =============================================
@@ -332,7 +318,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 7. MAP UPDATE (✅ FIXED: Preserves zoom/pan)
+  // 7. MAP UPDATE (✅ Preserves zoom/pan)
   // =============================================
   updateMap() {
     if (!this.currentData || !this.map) return;
@@ -359,7 +345,6 @@ class ElonTracker {
       this.markers.car = null;
     }
 
-    // Determine if we should auto-fit or preserve user view
     let shouldFitBounds = false;
     let fitBoundsCoords = null;
 
@@ -513,7 +498,6 @@ class ElonTracker {
         .addTo(this.map)
         .bindPopup(`<b>❓ UNKNOWN</b><br>${data.current_location || 'Unknown'}`);
       
-      // Unknown: just center on the location
       shouldFitBounds = false;
       fitBoundsCoords = null;
     }
@@ -521,30 +505,20 @@ class ElonTracker {
     // ✅ ZOOM FIX: Only auto-fit if user hasn't moved the map
     if (shouldFitBounds && fitBoundsCoords) {
       if (!this.userMovedMap) {
-        // First time or user hasn't interacted - fit bounds
         const bounds = L.latLngBounds(fitBoundsCoords);
         this.map.fitBounds(bounds, { padding: [50, 50] });
         this.lastMapZoom = this.map.getZoom();
         this.lastMapCenter = this.map.getCenter();
-        console.log('🗺️ Auto-fit bounds (user hasn\'t moved map)');
       } else {
-        // User has moved map - just update marker, preserve view
-        // But ensure marker is visible - if not, gently pan
         const markerLatLng = L.latLng(lat, lng);
         if (!this.map.getBounds().contains(markerLatLng)) {
-          // Marker is outside view - pan to include it but keep zoom
           this.map.panTo(markerLatLng, { animate: true });
-          console.log('🗺️ Panning to marker (zoom preserved)');
-        } else {
-          console.log('🗺️ Marker updated, zoom/pan preserved');
         }
       }
     } else if (!shouldFitBounds) {
-      // No destination - just center on location if user hasn't moved
       if (!this.userMovedMap) {
         this.map.setView([lat, lng], this.map.getZoom() || 4);
       } else {
-        // User moved map - check if marker is visible
         const markerLatLng = L.latLng(lat, lng);
         if (!this.map.getBounds().contains(markerLatLng)) {
           this.map.panTo(markerLatLng, { animate: true });
@@ -682,7 +656,7 @@ class ElonTracker {
   renderTimeline(history, options = {}) {
     const container = this.dom.timelineEvents;
     
-    // ✅ FIX: Save scroll position before re-render
+    // Save scroll position before re-render
     const savedScrollLeft = container ? container.scrollLeft : 0;
     const savedActiveIndex = this.activeEventIndex;
     
@@ -723,6 +697,7 @@ class ElonTracker {
       
       el.addEventListener('click', () => {
         const globalIndex = parseInt(el.dataset.globalIndex, 10);
+        this.isUserBrowsingHistory = true;
         this.jumpToEvent(globalIndex, 'click');
       });
       
@@ -732,7 +707,7 @@ class ElonTracker {
     
     // ✅ FIX: Restore active highlight or highlight last
     const shouldPreserveActive = options.preserveActive && savedActiveIndex >= 0;
-    const isLiveMode = this.isLiveMode;
+    const isLiveMode = this.isLiveMode && !this.isUserBrowsingHistory;
     
     if (shouldPreserveActive) {
       // User was browsing history - restore their selection
@@ -799,14 +774,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 13. HELPER: Update slider max
-  // =============================================
-  updateSliderMax() {
-    // Slider already uses 0-100, we calculate index dynamically
-  }
-
-  // =============================================
-  // 14. JUMP TO EVENT
+  // 13. JUMP TO EVENT
   // =============================================
   jumpToEvent(index, reason) {
     if (index < 0 || index >= this.historyData.length) return;
@@ -840,7 +808,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 15. HIGHLIGHT ACTIVE EVENT
+  // 14. HIGHLIGHT ACTIVE EVENT
   // =============================================
   highlightActiveEvent(index) {
     this.clearActiveHighlight();
@@ -858,7 +826,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 16. SCROLL TO ACTIVE EVENT
+  // 15. SCROLL TO ACTIVE EVENT
   // =============================================
   scrollToActiveEvent(index) {
     const events = this.historyData.length > this.MAX_EVENTS 
@@ -886,6 +854,20 @@ class ElonTracker {
       this.eventElements.forEach(el => el.classList.remove('active'));
     }
   }
+
+  // =============================================
+  // 16. GO BACK TO LIVE MODE
+  // =============================================
+  goLive() {
+    this.isLiveMode = true;
+    this.isUserBrowsingHistory = false;
+    this.activeEventIndex = -1;
+    this.dom.sliderMode.textContent = '🔴 LIVE';
+    this.dom.sliderMode.className = 'live-label';
+    this.clearActiveHighlight();
+    this.loadCurrent();
+    this.dom.timeSlider.value = 100;
+  }
 }
 
 // =============================================
@@ -894,4 +876,13 @@ class ElonTracker {
 document.addEventListener('DOMContentLoaded', () => {
   const tracker = new ElonTracker();
   tracker.init();
+  
+  // ✅ Add LIVE button functionality (click on mode label to go live)
+  const modeLabel = document.getElementById('slider-mode');
+  if (modeLabel) {
+    modeLabel.style.cursor = 'pointer';
+    modeLabel.addEventListener('click', () => {
+      tracker.goLive();
+    });
+  }
 });
