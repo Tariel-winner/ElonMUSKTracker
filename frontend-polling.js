@@ -2,7 +2,8 @@
 // Complete frontend logic with map, status card, and timeline slider
 // OPTIMIZED: No re-render on every poll, only update changed values
 // TIMELINE: Shows last 100 events with full date/time and active highlighting
-// SYNC: Slider and event list stay in sync
+// SYNC: Slider and event list stay in sync (bidirectional)
+// ZOOM: Preserves user zoom/pan when poll updates location
 
 class ElonTracker {
   constructor() {
@@ -17,6 +18,20 @@ class ElonTracker {
     this.activeEventIndex = -1;
     this.eventElements = [];
     this.isUserInteracting = false;
+    
+    // --- SYNC FIXES ---
+    this.syncing = false;           // Prevents slider ↔ scroll loop
+    this.userScrolling = false;
+    this.scrollTimeout = null;
+    this.MAX_EVENTS = 100;
+    
+    // --- ZOOM FIX ---
+    this.userMovedMap = false;      // ✅ Track if user zoomed/panned
+    this.lastMapZoom = 4;           // Store last zoom level
+    this.lastMapCenter = null;      // Store last center
+    
+    // --- TIMELINE FIX ---
+    this.preserveScrollPosition = false;  // ✅ Don't reset scroll on soft poll
   }
 
   // =============================================
@@ -31,6 +46,7 @@ class ElonTracker {
     await this.loadCurrent();
     this.startPolling();
     this.setupSlider();
+    this.setupScrollSync();
     this.updateUI();
     
     console.log('✅ Tracker initialized!');
@@ -61,7 +77,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 2. MAP SETUP
+  // 2. MAP SETUP (with zoom preservation)
   // =============================================
   initMap() {
     this.map = L.map('map', {
@@ -77,20 +93,86 @@ class ElonTracker {
       maxZoom: 19,
     }).addTo(this.map);
     
+    // ✅ FIX: Track user interaction for zoom preservation
+    this.map.on('zoomstart', () => {
+      this.userMovedMap = true;
+      this.lastMapZoom = this.map.getZoom();
+      console.log('🗺️ User zoomed — zoom preserved at:', this.lastMapZoom);
+    });
+    this.map.on('dragstart', () => {
+      this.userMovedMap = true;
+      this.lastMapCenter = this.map.getCenter();
+      console.log('🗺️ User panned — position preserved');
+    });
+    this.map.on('zoomend', () => {
+      this.lastMapZoom = this.map.getZoom();
+    });
+    this.map.on('moveend', () => {
+      this.lastMapCenter = this.map.getCenter();
+    });
+    
     console.log('🗺️ Map initialized (Dark Mode)');
   }
 
   // =============================================
   // 3. LOAD DATA
   // =============================================
-  async loadHistory() {
+  async loadHistory({ soft = false } = {}) {
     try {
       const res = await fetch('/api/history');
-      this.historyData = await res.json();
-      console.log(`📜 Loaded ${this.historyData.length} historical events`);
-      this.renderTimeline(this.historyData);
+      const rows = await res.json();
+      
+      if (soft) {
+        // ✅ FIX: Remember scroll position before appending
+        const container = this.dom.timelineEvents;
+        const savedScrollLeft = container ? container.scrollLeft : 0;
+        const savedActiveIndex = this.activeEventIndex;
+        
+        this.appendNewHistory(rows);
+        
+        // ✅ FIX: Restore scroll position and active highlight
+        if (container && this.preserveScrollPosition) {
+          container.scrollLeft = savedScrollLeft;
+          if (savedActiveIndex >= 0) {
+            this.highlightActiveEvent(savedActiveIndex);
+          }
+        }
+      } else {
+        this.historyData = rows;
+        this.renderTimeline(rows);
+      }
+      
+      console.log(`📜 Loaded ${this.historyData.length} historical events (soft: ${soft})`);
     } catch (err) {
       console.error('Failed to load history:', err);
+    }
+  }
+
+  appendNewHistory(rows) {
+    if (!rows || rows.length === 0) return;
+    
+    const lastTimestamp = this.historyData.length > 0 
+      ? this.historyData[this.historyData.length - 1].timestamp 
+      : null;
+    
+    const newEvents = lastTimestamp 
+      ? rows.filter(r => r.timestamp > lastTimestamp)
+      : rows;
+    
+    if (newEvents.length > 0) {
+      // ✅ FIX: Track if we're in live mode before appending
+      const wasLiveMode = this.isLiveMode;
+      const oldLength = this.historyData.length;
+      
+      this.historyData.push(...newEvents);
+      
+      // ✅ FIX: Only re-render if we have new events
+      this.renderTimeline(this.historyData, { 
+        preserveScroll: !wasLiveMode,
+        preserveActive: !wasLiveMode && this.activeEventIndex >= 0
+      });
+      
+      console.log(`📜 Appended ${newEvents.length} new events`);
     }
   }
 
@@ -103,11 +185,10 @@ class ElonTracker {
       }
       const newData = await res.json();
       
-      // Only update if data actually changed
       if (this.hasDataChanged(newData)) {
         this.currentData = newData;
         this.updateUI();
-        this.updateMap();
+        this.updateMap();   // ✅ Map updates with zoom preservation
         this.updateStatusCard();
       }
       
@@ -121,10 +202,12 @@ class ElonTracker {
   }
 
   // =============================================
-  // 3.5 CHECK IF DATA CHANGED
+  // 3.5 CHECK IF DATA CHANGED (FIXED)
   // =============================================
   hasDataChanged(newData) {
     if (!this.currentData) return true;
+    
+    if (this.currentData.timestamp !== newData.timestamp) return true;
     
     const fields = ['state', 'destination', 'confidence', 'current_location', 'lat', 'lng'];
     for (const field of fields) {
@@ -136,23 +219,32 @@ class ElonTracker {
   }
 
   // =============================================
-  // 4. POLLING
+  // 4. POLLING (FIXED)
   // =============================================
   startPolling() {
     this.pollingInterval = setInterval(() => {
       if (this.isLiveMode && !this.isUserInteracting) {
-        this.loadCurrent();
+        this.refreshLive();
       }
-    }, 10000);
+    }, 60000);
+  }
+
+  async refreshLive() {
+    this.preserveScrollPosition = true;  // ✅ Don't reset scroll on soft poll
+    await this.loadCurrent();
+    await this.loadHistory({ soft: true });
+    this.preserveScrollPosition = false;
   }
 
   // =============================================
-  // 5. SLIDER - SYNCED WITH TIMELINE
+  // 5. SLIDER - SYNCED WITH TIMELINE (FIXED)
   // =============================================
   setupSlider() {
     const slider = this.dom.timeSlider;
     
     slider.addEventListener('input', (e) => {
+      if (this.syncing) return;
+      
       this.isUserInteracting = true;
       const val = parseInt(e.target.value);
       this.lastSliderValue = val;
@@ -160,27 +252,7 @@ class ElonTracker {
       if (this.historyData.length === 0) return;
       
       const index = Math.round((val / 100) * (this.historyData.length - 1));
-      const dataPoint = this.historyData[index];
-      
-      if (dataPoint) {
-        this.isLiveMode = false;
-        this.activeEventIndex = index;
-        this.currentData = dataPoint;
-        
-        // Update slider mode text with timestamp
-        const formattedTime = this.formatTimestamp(dataPoint.timestamp);
-        this.dom.sliderMode.textContent = `⏸️ ${formattedTime}`;
-        this.dom.sliderMode.className = 'live-label paused';
-        
-        // Update all UI
-        this.updateUI();
-        this.updateMap();
-        this.updateStatusCard();
-        
-        // Highlight and scroll to the active event
-        this.highlightActiveEvent(index);
-        this.scrollToActiveEvent(index);
-      }
+      this.jumpToEvent(index, 'slider');
     });
     
     slider.addEventListener('mouseup', () => {
@@ -190,9 +262,44 @@ class ElonTracker {
         this.activeEventIndex = -1;
         this.dom.sliderMode.textContent = '🔴 LIVE';
         this.dom.sliderMode.className = 'live-label';
-        this.loadCurrent();
         this.clearActiveHighlight();
+        this.loadCurrent();
       }, 3000);
+    });
+  }
+
+  // Scroll sync listener (list → slider)
+  setupScrollSync() {
+    const list = this.dom.timelineEvents;
+    if (!list) return;
+    
+    list.addEventListener('scroll', () => {
+      if (this.syncing) return;
+      if (this.historyData.length === 0 || this.eventElements.length === 0) return;
+      
+      this.userScrolling = true;
+      clearTimeout(this.scrollTimeout);
+      this.scrollTimeout = setTimeout(() => {
+        this.userScrolling = false;
+      }, 150);
+      
+      const container = list;
+      const centerX = container.scrollLeft + container.clientWidth / 2;
+      
+      let best = 0;
+      let bestDist = Infinity;
+      
+      this.eventElements.forEach((el, i) => {
+        const elCenter = el.offsetLeft + el.offsetWidth / 2;
+        const dist = Math.abs(elCenter - centerX);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      });
+      
+      const globalIndex = this.localToGlobal(best);
+      this.jumpToEvent(globalIndex, 'scroll');
     });
   }
 
@@ -217,7 +324,6 @@ class ElonTracker {
         if (index !== -1) {
           const pct = (index / (this.historyData.length - 1)) * 100;
           this.dom.timeSlider.value = pct;
-          // Also highlight the corresponding event
           this.highlightActiveEvent(index);
           this.scrollToActiveEvent(index);
         }
@@ -226,7 +332,7 @@ class ElonTracker {
   }
 
   // =============================================
-  // 7. MAP UPDATE
+  // 7. MAP UPDATE (✅ FIXED: Preserves zoom/pan)
   // =============================================
   updateMap() {
     if (!this.currentData || !this.map) return;
@@ -252,6 +358,10 @@ class ElonTracker {
       this.map.removeLayer(this.markers.car);
       this.markers.car = null;
     }
+
+    // Determine if we should auto-fit or preserve user view
+    let shouldFitBounds = false;
+    let fitBoundsCoords = null;
 
     // IN FLIGHT
     if (data.state === 'in_flight') {
@@ -293,18 +403,11 @@ class ElonTracker {
               }
             ).addTo(this.map);
           }
+          
+          shouldFitBounds = true;
+          fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-      
-      if (data.destination && data.destination !== 'Unknown') {
-        const destCoords = this.getDestinationCoords(data.destination);
-        if (destCoords) {
-          const bounds = L.latLngBounds([[lat, lng], [destCoords.lat, destCoords.lng]]);
-          this.map.fitBounds(bounds, { padding: [50, 50] });
-          return;
-        }
-      }
-      this.map.setView([lat, lng], 6);
     }
     
     // LANDED
@@ -358,12 +461,10 @@ class ElonTracker {
             }
           ).addTo(this.map);
           
-          const bounds = L.latLngBounds([[lat, lng], [destCoords.lat, destCoords.lng]]);
-          this.map.fitBounds(bounds, { padding: [50, 50] });
-          return;
+          shouldFitBounds = true;
+          fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-      this.map.setView([lat, lng], 6);
     }
     
     // GROUNDED / PARKED
@@ -393,12 +494,10 @@ class ElonTracker {
             .addTo(this.map)
             .bindPopup(`📍 ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
           
-          const bounds = L.latLngBounds([[lat, lng], [destCoords.lat, destCoords.lng]]);
-          this.map.fitBounds(bounds, { padding: [50, 50] });
-          return;
+          shouldFitBounds = true;
+          fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-      this.map.setView([lat, lng], 6);
     }
     
     // UNKNOWN
@@ -414,7 +513,43 @@ class ElonTracker {
         .addTo(this.map)
         .bindPopup(`<b>❓ UNKNOWN</b><br>${data.current_location || 'Unknown'}`);
       
-      this.map.setView([lat, lng], 4);
+      // Unknown: just center on the location
+      shouldFitBounds = false;
+      fitBoundsCoords = null;
+    }
+
+    // ✅ ZOOM FIX: Only auto-fit if user hasn't moved the map
+    if (shouldFitBounds && fitBoundsCoords) {
+      if (!this.userMovedMap) {
+        // First time or user hasn't interacted - fit bounds
+        const bounds = L.latLngBounds(fitBoundsCoords);
+        this.map.fitBounds(bounds, { padding: [50, 50] });
+        this.lastMapZoom = this.map.getZoom();
+        this.lastMapCenter = this.map.getCenter();
+        console.log('🗺️ Auto-fit bounds (user hasn\'t moved map)');
+      } else {
+        // User has moved map - just update marker, preserve view
+        // But ensure marker is visible - if not, gently pan
+        const markerLatLng = L.latLng(lat, lng);
+        if (!this.map.getBounds().contains(markerLatLng)) {
+          // Marker is outside view - pan to include it but keep zoom
+          this.map.panTo(markerLatLng, { animate: true });
+          console.log('🗺️ Panning to marker (zoom preserved)');
+        } else {
+          console.log('🗺️ Marker updated, zoom/pan preserved');
+        }
+      }
+    } else if (!shouldFitBounds) {
+      // No destination - just center on location if user hasn't moved
+      if (!this.userMovedMap) {
+        this.map.setView([lat, lng], this.map.getZoom() || 4);
+      } else {
+        // User moved map - check if marker is visible
+        const markerLatLng = L.latLng(lat, lng);
+        if (!this.map.getBounds().contains(markerLatLng)) {
+          this.map.panTo(markerLatLng, { animate: true });
+        }
+      }
     }
   }
 
@@ -542,38 +677,41 @@ class ElonTracker {
   }
 
   // =============================================
-  // 10. TIMELINE RENDER (Enhanced with Full Date/Time)
+  // 10. TIMELINE RENDER (✅ FIXED: preserves active & scroll)
   // =============================================
-  renderTimeline(history) {
+  renderTimeline(history, options = {}) {
     const container = this.dom.timelineEvents;
+    
+    // ✅ FIX: Save scroll position before re-render
+    const savedScrollLeft = container ? container.scrollLeft : 0;
+    const savedActiveIndex = this.activeEventIndex;
+    
     container.innerHTML = '';
+    this.eventElements = [];
     
     if (!history || history.length === 0) {
       container.innerHTML = '<span class="event">No events yet</span>';
       return;
     }
     
-    const MAX_EVENTS = 100;
-    const events = history.length > MAX_EVENTS 
-      ? history.slice(-MAX_EVENTS) 
+    const events = history.length > this.MAX_EVENTS 
+      ? history.slice(-this.MAX_EVENTS) 
       : history;
     
-    if (history.length > MAX_EVENTS) {
+    if (history.length > this.MAX_EVENTS) {
       const countEl = document.createElement('span');
       countEl.className = 'event count-info';
-      countEl.textContent = `📊 Showing last ${MAX_EVENTS} of ${history.length} events`;
+      countEl.textContent = `📊 Showing last ${this.MAX_EVENTS} of ${history.length} events`;
       container.appendChild(countEl);
     }
-    
-    this.eventElements = [];
     
     for (let i = 0; i < events.length; i++) {
       const item = events[i];
       const el = document.createElement('span');
       el.className = 'event';
       el.dataset.index = i;
+      el.dataset.globalIndex = history.length - events.length + i;
       
-      // ✅ FULL DATE/TIME FORMAT
       const time = this.formatTimestamp(item.timestamp);
       const dest = item.destination || item.state || 'unknown';
       const conf = Math.round((item.confidence || 0) * 100);
@@ -583,23 +721,48 @@ class ElonTracker {
       
       el.innerHTML = `<span class="time">${time}</span> ${icon} → <span class="dest">${dest}</span> <span class="conf">(${conf}%)</span>`;
       
-      // Click to jump to this event
       el.addEventListener('click', () => {
-        const globalIndex = history.length - events.length + i;
-        this.jumpToEvent(globalIndex);
+        const globalIndex = parseInt(el.dataset.globalIndex, 10);
+        this.jumpToEvent(globalIndex, 'click');
       });
       
       container.appendChild(el);
       this.eventElements.push(el);
     }
     
-    // Highlight the last event (most recent)
-    if (this.eventElements.length > 0) {
+    // ✅ FIX: Restore active highlight or highlight last
+    const shouldPreserveActive = options.preserveActive && savedActiveIndex >= 0;
+    const isLiveMode = this.isLiveMode;
+    
+    if (shouldPreserveActive) {
+      // User was browsing history - restore their selection
+      this.highlightActiveEvent(savedActiveIndex);
+    } else if (isLiveMode && this.eventElements.length > 0) {
+      // Live mode - highlight the latest event
+      const lastIndex = this.eventElements.length - 1;
+      this.eventElements[lastIndex].classList.add('active');
+      this.activeEventIndex = history.length - 1;
+    } else if (this.eventElements.length > 0) {
+      // Not live, not preserving - highlight last as default
       const lastIndex = this.eventElements.length - 1;
       this.eventElements[lastIndex].classList.add('active');
     }
     
-    container.scrollTop = container.scrollHeight;
+    // ✅ FIX: Restore scroll position or scroll to end in live mode
+    const shouldPreserveScroll = options.preserveScroll && savedScrollLeft > 0;
+    
+    if (shouldPreserveScroll) {
+      container.scrollLeft = savedScrollLeft;
+    } else if (isLiveMode) {
+      container.scrollLeft = container.scrollWidth;
+    } else {
+      // If we have an active event, scroll to it
+      if (this.activeEventIndex >= 0) {
+        this.scrollToActiveEvent(this.activeEventIndex);
+      } else {
+        container.scrollLeft = container.scrollWidth;
+      }
+    }
   }
 
   // =============================================
@@ -626,18 +789,41 @@ class ElonTracker {
   }
 
   // =============================================
-  // 12. JUMP TO EVENT
+  // 12. HELPER: Convert local index to global
   // =============================================
-  jumpToEvent(index) {
+  localToGlobal(localIndex) {
+    const events = this.historyData.length > this.MAX_EVENTS 
+      ? this.historyData.slice(-this.MAX_EVENTS) 
+      : this.historyData;
+    return localIndex + (this.historyData.length - events.length);
+  }
+
+  // =============================================
+  // 13. HELPER: Update slider max
+  // =============================================
+  updateSliderMax() {
+    // Slider already uses 0-100, we calculate index dynamically
+  }
+
+  // =============================================
+  // 14. JUMP TO EVENT
+  // =============================================
+  jumpToEvent(index, reason) {
     if (index < 0 || index >= this.historyData.length) return;
+    if (this.syncing) return;
     
     const dataPoint = this.historyData[index];
     this.isLiveMode = false;
     this.activeEventIndex = index;
     this.currentData = dataPoint;
     
-    const pct = (index / (this.historyData.length - 1)) * 100;
-    this.dom.timeSlider.value = pct;
+    if (reason !== 'slider') {
+      this.syncing = true;
+      const pct = (index / (this.historyData.length - 1)) * 100;
+      this.dom.timeSlider.value = pct;
+      setTimeout(() => { this.syncing = false; }, 100);
+    }
+    
     const formattedTime = this.formatTimestamp(dataPoint.timestamp);
     this.dom.sliderMode.textContent = `⏸️ ${formattedTime}`;
     this.dom.sliderMode.className = 'live-label paused';
@@ -645,45 +831,53 @@ class ElonTracker {
     this.updateUI();
     this.updateMap();
     this.updateStatusCard();
+    
     this.highlightActiveEvent(index);
-    this.scrollToActiveEvent(index);
+    
+    if (reason !== 'scroll') {
+      this.scrollToActiveEvent(index);
+    }
   }
 
   // =============================================
-  // 13. HIGHLIGHT ACTIVE EVENT
+  // 15. HIGHLIGHT ACTIVE EVENT
   // =============================================
   highlightActiveEvent(index) {
     this.clearActiveHighlight();
     
-    const MAX_EVENTS = 100;
-    const events = this.historyData.length > MAX_EVENTS 
-      ? this.historyData.slice(-MAX_EVENTS) 
+    const events = this.historyData.length > this.MAX_EVENTS 
+      ? this.historyData.slice(-this.MAX_EVENTS) 
       : this.historyData;
     
     const localIndex = index - (this.historyData.length - events.length);
     
     if (localIndex >= 0 && localIndex < this.eventElements.length) {
       this.eventElements[localIndex].classList.add('active');
+      this.activeEventIndex = index;
     }
   }
 
   // =============================================
-  // 14. SCROLL TO ACTIVE EVENT
+  // 16. SCROLL TO ACTIVE EVENT
   // =============================================
   scrollToActiveEvent(index) {
-    const MAX_EVENTS = 100;
-    const events = this.historyData.length > MAX_EVENTS 
-      ? this.historyData.slice(-MAX_EVENTS) 
+    const events = this.historyData.length > this.MAX_EVENTS 
+      ? this.historyData.slice(-this.MAX_EVENTS) 
       : this.historyData;
     
     const localIndex = index - (this.historyData.length - events.length);
     
     if (localIndex >= 0 && localIndex < this.eventElements.length) {
-      this.eventElements[localIndex].scrollIntoView({ 
-        behavior: 'smooth', 
-        block: 'nearest',
-        inline: 'nearest'
+      const el = this.eventElements[localIndex];
+      const container = this.dom.timelineEvents;
+      
+      this.syncing = true;
+      const scrollOffset = el.offsetLeft - (container.clientWidth / 2) + (el.offsetWidth / 2);
+      container.scrollTo({
+        left: Math.max(0, scrollOffset),
+        behavior: 'smooth'
       });
+      setTimeout(() => { this.syncing = false; }, 200);
     }
   }
 
@@ -695,7 +889,7 @@ class ElonTracker {
 }
 
 // =============================================
-// 15. START
+// 17. START
 // =============================================
 document.addEventListener('DOMContentLoaded', () => {
   const tracker = new ElonTracker();
