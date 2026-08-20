@@ -277,6 +277,19 @@
       margin-top: 6px;
       text-align: right;
     }
+
+    .status-card .data-meta {
+      font-size: 10px;
+      color: #667788;
+      margin-top: 4px;
+      text-align: right;
+    }
+
+    .status-card .observed-row .value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      color: #99aabb;
+    }
     
     /* Timeline Slider - ENHANCED */
     .timeline-container {
@@ -616,6 +629,10 @@
             <span class="label">📍 Current</span>
             <span class="value" id="current-location">Unknown</span>
           </div>
+          <div class="row observed-row">
+            <span class="label">📡 Observed</span>
+            <span class="value" id="observed-coords">—</span>
+          </div>
           <div class="row">
             <span class="label">🎯 Destination</span>
             <span class="value" id="destination">Unknown</span>
@@ -641,6 +658,7 @@
             <li>Waiting for data...</li>
           </div>
           <div class="timestamp" id="timestamp">—</div>
+          <div class="data-meta" id="data-meta">Source: — · Age: —</div>
         </div>
         
         <!-- Timeline Slider -->

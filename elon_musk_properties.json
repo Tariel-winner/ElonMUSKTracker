@@ -2,243 +2,442 @@
   "billionaire": "Elon Musk",
   "last_updated": "2026-08-19",
   "tail_numbers": ["N628TS", "N502SX"],
-  "corporate_hqs": [
+  "places": [
     {
+      "id": "tesla_hq",
       "name": "Tesla HQ",
       "address": "1 Tesla Road, Austin, TX 78725",
       "lat": 30.2655,
       "lng": -97.7044,
-      "type": "corporate_hq"
+      "type": "work",
+      "category": "corporate_hq",
+      "weight": 1.0,
+      "max_radius_miles": 30,
+      "use_for": ["in_flight", "grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KAUS"],
+      "timezone": "America/Chicago",
+      "work_hours_start": 9,
+      "work_hours_end": 17
     },
     {
+      "id": "spacex_hq",
       "name": "SpaceX HQ",
       "address": "1 Rocket Road, Hawthorne, CA 90250",
       "lat": 33.9207,
       "lng": -118.3271,
-      "type": "corporate_hq"
+      "type": "work",
+      "category": "corporate_hq",
+      "weight": 0.9,
+      "max_radius_miles": 15,
+      "use_for": ["in_flight", "grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KHHR", "KLAX"],
+      "timezone": "America/Los_Angeles",
+      "work_hours_start": 9,
+      "work_hours_end": 17
     },
     {
+      "id": "xai_hq",
       "name": "xAI HQ",
       "address": "2450 Scott Boulevard, Palo Alto, CA 94303",
       "lat": 37.4450,
       "lng": -122.1470,
-      "type": "corporate_hq"
+      "type": "work",
+      "category": "corporate_hq",
+      "weight": 0.7,
+      "max_radius_miles": 10,
+      "use_for": ["in_flight", "grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KPAO", "KSJC"],
+      "timezone": "America/Los_Angeles",
+      "work_hours_start": 9,
+      "work_hours_end": 17
     },
     {
+      "id": "boring_hq",
       "name": "The Boring Company HQ",
       "address": "1000 E. 26th Street, Austin, TX 78702",
       "lat": 30.2455,
       "lng": -97.7120,
-      "type": "corporate_hq"
+      "type": "work",
+      "category": "corporate_hq",
+      "weight": 0.6,
+      "max_radius_miles": 10,
+      "use_for": ["in_flight", "grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KAUS"],
+      "timezone": "America/Chicago"
     },
     {
+      "id": "neuralink_hq",
       "name": "Neuralink HQ",
       "address": "1010 Atlantic Avenue, Fremont, CA 94538",
       "lat": 37.4880,
       "lng": -121.9380,
-      "type": "corporate_hq"
-    }
-  ],
-  "residences": [
+      "type": "work",
+      "category": "corporate_hq",
+      "weight": 0.5,
+      "max_radius_miles": 10,
+      "use_for": ["in_flight", "grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KPAO", "KSJC"],
+      "timezone": "America/Los_Angeles"
+    },
     {
+      "id": "bel_air_mansion",
       "name": "Bel Air Mansion",
       "address": "1145 Chalon Road, Los Angeles, CA 90049",
       "lat": 34.0882,
       "lng": -118.4420,
-      "type": "residence"
+      "type": "home",
+      "category": "residence",
+      "weight": 0.8,
+      "max_radius_miles": 5,
+      "use_for": ["grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KVNY", "KLAX"],
+      "timezone": "America/Los_Angeles"
     },
     {
+      "id": "manhattan_penthouse",
       "name": "Manhattan Penthouse",
       "address": "150 Central Park West, New York, NY 10023",
       "lat": 40.7773,
       "lng": -73.9760,
-      "type": "residence"
+      "type": "home",
+      "category": "residence",
+      "weight": 0.7,
+      "max_radius_miles": 3,
+      "use_for": ["grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KTEB", "KEWR"],
+      "timezone": "America/New_York"
     },
     {
+      "id": "austin_ranch",
       "name": "Austin Ranch",
       "address": "Near Austin, TX",
       "lat": 30.2500,
       "lng": -97.5000,
-      "type": "residence"
+      "type": "home",
+      "category": "residence",
+      "weight": 0.5,
+      "max_radius_miles": 10,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KAUS"],
+      "timezone": "America/Chicago"
     },
     {
+      "id": "lake_austin_property",
       "name": "Lake Austin Property",
       "address": "Lake Austin, TX",
       "lat": 30.3140,
       "lng": -97.8680,
-      "type": "residence"
+      "type": "home",
+      "category": "residence",
+      "weight": 0.5,
+      "max_radius_miles": 5,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KAUS"],
+      "timezone": "America/Chicago"
     },
     {
+      "id": "jackson_hole_property",
       "name": "Jackson Hole Property",
       "address": "Jackson Hole, WY",
       "lat": 43.4800,
       "lng": -110.7620,
-      "type": "residence"
-    }
-  ],
-  "family_properties": [
+      "type": "vacation",
+      "category": "residence",
+      "weight": 0.4,
+      "max_radius_miles": 20,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KJAC"],
+      "timezone": "America/Denver"
+    },
     {
+      "id": "kimbals_farm_boulder",
       "name": "Kimbal's Farm (Boulder, CO)",
       "owner": "Kimbal Musk",
       "relationship": "brother",
       "address": "Boulder, CO",
       "lat": 40.0145,
       "lng": -105.2705,
-      "type": "family"
+      "type": "family",
+      "category": "family_property",
+      "weight": 0.4,
+      "max_radius_miles": 15,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KBJC", "KDEN"],
+      "timezone": "America/Denver"
     },
     {
+      "id": "kimbals_nyc_restaurant",
       "name": "Kimbal's NYC Restaurant",
       "owner": "Kimbal Musk",
       "relationship": "brother",
       "address": "NYC, NY",
       "lat": 40.7422,
       "lng": -73.9885,
-      "type": "family"
+      "type": "family",
+      "category": "family_property",
+      "weight": 0.3,
+      "max_radius_miles": 3,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KTEB", "KEWR"],
+      "timezone": "America/New_York"
     },
     {
+      "id": "mayes_nyc_apartment",
       "name": "Maye's NYC Apartment",
       "owner": "Maye Musk",
       "relationship": "mother",
       "address": "NYC, NY",
       "lat": 40.7580,
       "lng": -73.9855,
-      "type": "family"
+      "type": "family",
+      "category": "family_property",
+      "weight": 0.4,
+      "max_radius_miles": 3,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KTEB", "KEWR"],
+      "timezone": "America/New_York"
     },
     {
+      "id": "mayes_la_residence",
       "name": "Maye's LA Residence",
       "owner": "Maye Musk",
       "relationship": "mother",
       "address": "Los Angeles, CA",
       "lat": 34.0522,
       "lng": -118.2437,
-      "type": "family"
+      "type": "family",
+      "category": "family_property",
+      "weight": 0.3,
+      "max_radius_miles": 10,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KVNY", "KLAX"],
+      "timezone": "America/Los_Angeles"
     },
     {
+      "id": "grimes_malibu_house",
       "name": "Grimes' Malibu House",
       "owner": "Grimes",
       "relationship": "ex-partner",
       "address": "Malibu, CA",
       "lat": 34.0250,
       "lng": -118.7800,
-      "type": "family"
-    }
-  ],
-  "friends_properties": [
+      "type": "family",
+      "category": "family_property",
+      "weight": 0.2,
+      "max_radius_miles": 5,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KVNY", "KLAX"],
+      "timezone": "America/Los_Angeles"
+    },
     {
+      "id": "larry_ellison_lanai",
       "name": "Larry Ellison's Lanai Estate",
       "owner": "Larry Ellison",
       "relationship": "friend",
       "address": "Lanai, Hawaii",
       "lat": 20.6789,
       "lng": -156.0000,
-      "type": "friend"
+      "type": "friend",
+      "category": "friends_property",
+      "weight": 0.2,
+      "max_radius_miles": 10,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["PHNY", "PHNL"],
+      "timezone": "Pacific/Honolulu"
     },
     {
+      "id": "peter_thiel_la_mansion",
       "name": "Peter Thiel's LA Mansion",
       "owner": "Peter Thiel",
       "relationship": "friend",
       "address": "Los Angeles, CA",
       "lat": 34.0845,
       "lng": -118.4485,
-      "type": "friend"
-    }
-  ],
-  "frequent_destinations": [
+      "type": "friend",
+      "category": "friends_property",
+      "weight": 0.2,
+      "max_radius_miles": 5,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KVNY", "KLAX"],
+      "timezone": "America/Los_Angeles"
+    },
     {
+      "id": "miami_f1",
       "name": "Miami (F1/Events)",
       "address": "Miami, FL",
       "lat": 25.7617,
       "lng": -80.1918,
-      "type": "event"
+      "type": "event",
+      "category": "frequent_destination",
+      "weight": 0.3,
+      "max_radius_miles": 10,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KMIA", "KFLL"],
+      "timezone": "America/New_York"
     },
     {
+      "id": "las_vegas_ufc",
       "name": "Las Vegas (UFC/Events)",
       "address": "Las Vegas, NV",
       "lat": 36.1699,
       "lng": -115.1398,
-      "type": "event"
+      "type": "event",
+      "category": "frequent_destination",
+      "weight": 0.3,
+      "max_radius_miles": 10,
+      "use_for": ["grounded"],
+      "coord_quality": "approximate",
+      "linked_airports": ["KLAS"],
+      "timezone": "America/Los_Angeles"
     },
     {
-      "name": "Sun Valley, Idaho",
-      "address": "Sun Valley, ID",
-      "lat": 43.6941,
-      "lng": -114.3521,
-      "type": "event"
-    },
-    {
+      "id": "boca_chica",
       "name": "Boca Chica (SpaceX Launch Site)",
       "address": "Boca Chica, TX",
       "lat": 25.9973,
       "lng": -97.1560,
-      "type": "corporate"
+      "type": "corporate",
+      "category": "frequent_destination",
+      "weight": 0.5,
+      "max_radius_miles": 20,
+      "use_for": ["in_flight", "grounded"],
+      "coord_quality": "precise",
+      "linked_airports": ["KBRO", "KHRL"],
+      "timezone": "America/Chicago"
     }
   ],
   "airports": [
     {
+      "code": "KTEB",
       "name": "Teterboro Airport",
       "lat": 40.8505,
       "lng": -74.0613
     },
     {
+      "code": "KVNY",
       "name": "Van Nuys Airport",
       "lat": 34.2098,
       "lng": -118.4900
     },
     {
+      "code": "KAUS",
       "name": "Austin-Bergstrom Airport",
       "lat": 30.1945,
       "lng": -97.6700
     },
     {
+      "code": "KHHR",
       "name": "Hawthorne Municipal Airport",
       "lat": 33.9226,
       "lng": -118.3350
     },
     {
+      "code": "KPAO",
       "name": "Palo Alto Airport",
       "lat": 37.4611,
       "lng": -122.1150
     },
     {
+      "code": "KJAC",
       "name": "Jackson Hole Airport",
       "lat": 43.6072,
       "lng": -110.7378
+    },
+    {
+      "code": "KLAX",
+      "name": "Los Angeles International Airport",
+      "lat": 33.9416,
+      "lng": -118.4085
+    },
+    {
+      "code": "KEWR",
+      "name": "Newark Liberty International Airport",
+      "lat": 40.6895,
+      "lng": -74.1745
+    },
+    {
+      "code": "KSJC",
+      "name": "San Jose International Airport",
+      "lat": 37.3639,
+      "lng": -121.9290
+    },
+    {
+      "code": "KDEN",
+      "name": "Denver International Airport",
+      "lat": 39.8561,
+      "lng": -104.6737
+    },
+    {
+      "code": "PHNY",
+      "name": "Lanai Airport",
+      "lat": 20.7856,
+      "lng": -156.9514
+    },
+    {
+      "code": "KMIA",
+      "name": "Miami International Airport",
+      "lat": 25.7932,
+      "lng": -80.2906
+    },
+    {
+      "code": "KLAS",
+      "name": "Harry Reid International Airport",
+      "lat": 36.0801,
+      "lng": -115.1523
     }
   ],
   "routes": [
     {
-      "from": "Teterboro Airport",
-      "to": "Manhattan Penthouse",
+      "from_airport": "KTEB",
+      "to_place": "manhattan_penthouse",
       "distance_miles": 16,
       "drive_time_minutes": 45
     },
     {
-      "from": "Van Nuys Airport",
-      "to": "Bel Air Mansion",
+      "from_airport": "KVNY",
+      "to_place": "bel_air_mansion",
       "distance_miles": 12,
       "drive_time_minutes": 30
     },
     {
-      "from": "Hawthorne Airport",
-      "to": "SpaceX HQ",
+      "from_airport": "KHHR",
+      "to_place": "spacex_hq",
       "distance_miles": 2,
       "drive_time_minutes": 5
     },
     {
-      "from": "Austin-Bergstrom Airport",
-      "to": "Tesla HQ",
+      "from_airport": "KAUS",
+      "to_place": "tesla_hq",
       "distance_miles": 12,
       "drive_time_minutes": 20
     },
     {
-      "from": "Austin-Bergstrom Airport",
-      "to": "Austin Ranch",
+      "from_airport": "KAUS",
+      "to_place": "austin_ranch",
       "distance_miles": 20,
       "drive_time_minutes": 30
     },
     {
-      "from": "Palo Alto Airport",
-      "to": "xAI HQ",
+      "from_airport": "KPAO",
+      "to_place": "xai_hq",
       "distance_miles": 3,
       "drive_time_minutes": 10
     }

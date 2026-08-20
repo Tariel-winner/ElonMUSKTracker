@@ -12,7 +12,7 @@ class ElonTracker {
     this.isLiveMode = true;
     this.pollingInterval = null;
     this.map = null;
-    this.markers = { plane: null, destination: null, path: null, car: null };
+    this.markers = { plane: null, destination: null, path: null, car: null, flightPath: null };
     this.lastSliderValue = 100;
     this.dom = {};
     this.activeEventIndex = -1;
@@ -29,16 +29,22 @@ class ElonTracker {
     this.userMovedMap = false;
     this.lastMapZoom = 4;
     this.lastMapCenter = null;
+
+    // --- PLACES + OBSERVATION ---
+    this.placesByName = {};
+    this.flightPathPoints = [];
   }
 
   // =============================================
   // 1. INITIALIZE
   // =============================================
   async init() {
-    console.log('🚀 Initializing Elon Musk Tracker...');
+    console.log('🚀 Initializing tracker UI...');
     
     this.cacheDomElements();
     this.initMap();
+    await this.loadPlaces();
+    await this.loadFlightPath();
     await this.loadHistory();
     await this.loadCurrent();
     this.startPolling();
@@ -70,6 +76,8 @@ class ElonTracker {
       sliderMode: document.getElementById('slider-mode'),
       timeSlider: document.getElementById('time-slider'),
       cardsTrack: document.getElementById('cards-track'),
+      dataMeta: document.getElementById('data-meta'),
+      observedCoords: document.getElementById('observed-coords'),
     };
   }
 
@@ -111,6 +119,68 @@ class ElonTracker {
   // =============================================
   // 3. LOAD DATA
   // =============================================
+  async loadPlaces() {
+    try {
+      const res = await fetch('/elon_musk_properties.json');
+      if (!res.ok) throw new Error(`places ${res.status}`);
+      const data = await res.json();
+      const places = data.places || [];
+      this.placesByName = {};
+      for (const p of places) {
+        if (!p.name || p.lat == null || p.lng == null) continue;
+        this.placesByName[p.name] = { lat: p.lat, lng: p.lng, ...p };
+      }
+      console.log(`📍 Loaded ${places.length} places for destination markers`);
+    } catch (err) {
+      console.warn('Places load failed, destination markers may be limited:', err.message);
+    }
+  }
+
+  async loadFlightPath() {
+    try {
+      const res = await fetch('/api/flight-path');
+      if (!res.ok) return;
+      const rows = await res.json();
+      this.flightPathPoints = (rows || [])
+        .filter(r => r.lat != null && r.lng != null)
+        .map(r => [r.lat, r.lng]);
+      this.drawFlightPath();
+    } catch (err) {
+      console.warn('Flight path load failed:', err.message);
+    }
+  }
+
+  drawFlightPath() {
+    if (!this.map || this.flightPathPoints.length < 2) return;
+    if (this.markers.flightPath) {
+      this.map.removeLayer(this.markers.flightPath);
+      this.markers.flightPath = null;
+    }
+    this.markers.flightPath = L.polyline(this.flightPathPoints, {
+      color: '#446688',
+      weight: 2,
+      opacity: 0.55,
+    }).addTo(this.map);
+  }
+
+  /** Prefer observation coords; never invent USA center when unknown. */
+  getPosition(data) {
+    if (!data) return null;
+    const lat = data.observed_lat ?? data.lat ?? data.current_lat;
+    const lng = data.observed_lng ?? data.lng ?? data.current_lng;
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return { lat, lng, source: 'observation' };
+    }
+    // History rows sometimes store "lat, lng" as current_location
+    if (typeof data.current_location === 'string' && data.current_location.includes(',')) {
+      const parts = data.current_location.split(',').map(s => parseFloat(s.trim()));
+      if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+        return { lat: parts[0], lng: parts[1], source: 'parsed' };
+      }
+    }
+    return null;
+  }
+
   async loadHistory({ soft = false } = {}) {
     try {
       const res = await fetch('/api/history');
@@ -182,13 +252,28 @@ class ElonTracker {
     if (!this.currentData) return true;
     if (this.currentData.timestamp !== newData.timestamp) return true;
     
-    const fields = ['state', 'destination', 'confidence', 'current_location', 'lat', 'lng'];
+    const fields = [
+      'state', 'destination', 'confidence', 'current_location',
+      'observed_lat', 'observed_lng', 'observed_on_ground', 'observed_age',
+    ];
     for (const field of fields) {
-      if (this.currentData[field] !== newData[field]) {
-        return true;
-      }
+      if (this.currentData[field] !== newData[field]) return true;
     }
+
+    const oldMeta = this.currentData._meta || {};
+    const newMeta = newData._meta || {};
+    if (oldMeta.isStale !== newMeta.isStale) return true;
+    if (oldMeta.inferenceSource !== newMeta.inferenceSource) return true;
+    if (oldMeta.flightAge !== newMeta.flightAge) return true;
+    if (oldMeta.lastUpdated !== newMeta.lastUpdated) return true;
+
     return false;
+  }
+
+  async refreshLive() {
+    await this.loadCurrent();
+    await this.loadHistory({ soft: true });
+    await this.loadFlightPath();
   }
 
   // =============================================
@@ -200,11 +285,6 @@ class ElonTracker {
         this.refreshLive();
       }
     }, 10000);
-  }
-
-  async refreshLive() {
-    await this.loadCurrent();
-    await this.loadHistory({ soft: true });
   }
 
   // =============================================
@@ -290,10 +370,11 @@ class ElonTracker {
     if (!this.currentData) return;
     
     const data = this.currentData;
+    const meta = data._meta || {};
     
     if (data.state) {
       this.dom.statusText.textContent = data.state.toUpperCase();
-      this.dom.statusDot.className = 'dot live';
+      this.dom.statusDot.className = meta.isStale ? 'dot error' : 'dot live';
     }
     
     if (this.isLiveMode) {
@@ -318,10 +399,13 @@ class ElonTracker {
     if (!this.currentData || !this.map) return;
     
     const data = this.currentData;
-    const lat = data.current_lat || data.lat || 39.8283;
-    const lng = data.current_lng || data.lng || -98.5795;
+    const pos = this.getPosition(data);
+    if (!pos) {
+      console.warn('No observed position yet — skipping map pin update');
+      return;
+    }
+    const { lat, lng } = pos;
     
-    // Remove old markers
     if (this.markers.plane) {
       this.map.removeLayer(this.markers.plane);
       this.markers.plane = null;
@@ -341,8 +425,8 @@ class ElonTracker {
 
     let shouldFitBounds = false;
     let fitBoundsCoords = null;
+    const showDest = data.destination && data.destination !== 'Unknown' && (data.confidence || 0) >= 0.3;
 
-    // IN FLIGHT
     if (data.state === 'in_flight') {
       const planeIcon = L.divIcon({
         html: '🛩️',
@@ -353,9 +437,9 @@ class ElonTracker {
       
       this.markers.plane = L.marker([lat, lng], { icon: planeIcon })
         .addTo(this.map)
-        .bindPopup(`<b>✈️ IN FLIGHT</b><br>${data.current_location || 'Unknown'}`);
+        .bindPopup(`<b>✈️ IN FLIGHT</b><br>Observed: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
       
-      if (data.destination && data.destination !== 'Unknown') {
+      if (showDest) {
         const destCoords = this.getDestinationCoords(data.destination);
         if (destCoords) {
           const destIcon = L.divIcon({
@@ -367,30 +451,19 @@ class ElonTracker {
           
           this.markers.destination = L.marker([destCoords.lat, destCoords.lng], { icon: destIcon })
             .addTo(this.map)
-            .bindPopup(`🎯 ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
+            .bindPopup(`🎯 Guess: ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
           
-          if (data.confidence > 0.15) {
-            const opacity = Math.min(data.confidence + 0.2, 0.8);
-            this.markers.path = L.polyline(
-              [[lat, lng], [destCoords.lat, destCoords.lng]],
-              {
-                color: '#00d4ff',
-                weight: 2,
-                dashArray: '8, 8',
-                opacity: opacity,
-                className: 'ghost-path'
-              }
-            ).addTo(this.map);
-          }
+          const opacity = Math.min(data.confidence + 0.2, 0.8);
+          this.markers.path = L.polyline(
+            [[lat, lng], [destCoords.lat, destCoords.lng]],
+            { color: '#00d4ff', weight: 2, dashArray: '8, 8', opacity }
+          ).addTo(this.map);
           
           shouldFitBounds = true;
           fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-    }
-    
-    // LANDED
-    else if (data.state === 'landed') {
+    } else if (data.state === 'landed') {
       const landedIcon = L.divIcon({
         html: '🛬',
         className: 'landed-marker',
@@ -400,9 +473,9 @@ class ElonTracker {
       
       this.markers.plane = L.marker([lat, lng], { icon: landedIcon })
         .addTo(this.map)
-        .bindPopup(`<b>🛬 LANDED</b><br>${data.current_location || 'Unknown'}`);
+        .bindPopup(`<b>🛬 LANDED</b><br>Observed: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
       
-      if (data.destination && data.destination !== 'Unknown') {
+      if (showDest) {
         const destCoords = this.getDestinationCoords(data.destination);
         if (destCoords) {
           const destIcon = L.divIcon({
@@ -414,40 +487,30 @@ class ElonTracker {
           
           this.markers.destination = L.marker([destCoords.lat, destCoords.lng], { icon: destIcon })
             .addTo(this.map)
-            .bindPopup(`🎯 ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
+            .bindPopup(`🎯 Guess: ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
           
           const midLat = (lat + destCoords.lat) / 2;
           const midLng = (lng + destCoords.lng) / 2;
-          
           const carIcon = L.divIcon({
             html: '🚗',
             className: 'car-marker',
             iconSize: [24, 24],
             iconAnchor: [12, 12]
           });
-          
           this.markers.car = L.marker([midLat, midLng], { icon: carIcon })
             .addTo(this.map)
-            .bindPopup(`🚗 Motorcade en route to ${data.destination}`);
+            .bindPopup(`🚗 En route guess → ${data.destination}`);
           
           this.markers.path = L.polyline(
             [[lat, lng], [destCoords.lat, destCoords.lng]],
-            {
-              color: '#00ff88',
-              weight: 3,
-              opacity: 0.8,
-              className: 'route-path'
-            }
+            { color: '#00ff88', weight: 3, opacity: 0.8 }
           ).addTo(this.map);
           
           shouldFitBounds = true;
           fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-    }
-    
-    // GROUNDED / PARKED
-    else if (data.state === 'grounded' || data.state === 'parked') {
+    } else if (data.state === 'grounded' || data.state === 'parked') {
       const parkedIcon = L.divIcon({
         html: '🅿️',
         className: 'parked-marker',
@@ -457,9 +520,9 @@ class ElonTracker {
       
       this.markers.plane = L.marker([lat, lng], { icon: parkedIcon })
         .addTo(this.map)
-        .bindPopup(`<b>🅿️ PARKED</b><br>${data.current_location || 'Unknown'}`);
+        .bindPopup(`<b>🅿️ GROUNDED</b><br>Observed: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
       
-      if (data.destination && data.destination !== 'Unknown') {
+      if (showDest) {
         const destCoords = this.getDestinationCoords(data.destination);
         if (destCoords) {
           const destIcon = L.divIcon({
@@ -471,16 +534,13 @@ class ElonTracker {
           
           this.markers.destination = L.marker([destCoords.lat, destCoords.lng], { icon: destIcon })
             .addTo(this.map)
-            .bindPopup(`📍 ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
+            .bindPopup(`📍 Guess: ${data.destination}<br>Confidence: ${Math.round(data.confidence * 100)}%`);
           
           shouldFitBounds = true;
           fitBoundsCoords = [[lat, lng], [destCoords.lat, destCoords.lng]];
         }
       }
-    }
-    
-    // UNKNOWN
-    else {
+    } else {
       const unknownIcon = L.divIcon({
         html: '❓',
         className: 'unknown-marker',
@@ -490,13 +550,9 @@ class ElonTracker {
       
       this.markers.plane = L.marker([lat, lng], { icon: unknownIcon })
         .addTo(this.map)
-        .bindPopup(`<b>❓ UNKNOWN</b><br>${data.current_location || 'Unknown'}`);
-      
-      shouldFitBounds = false;
-      fitBoundsCoords = null;
+        .bindPopup(`Observed: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
     }
 
-    // ZOOM FIX: Only auto-fit if user hasn't moved the map
     if (shouldFitBounds && fitBoundsCoords) {
       if (!this.userMovedMap) {
         const bounds = L.latLngBounds(fitBoundsCoords);
@@ -509,54 +565,30 @@ class ElonTracker {
           this.map.panTo(markerLatLng, { animate: true });
         }
       }
-    } else if (!shouldFitBounds) {
-      if (!this.userMovedMap) {
-        this.map.setView([lat, lng], this.map.getZoom() || 4);
-      } else {
-        const markerLatLng = L.latLng(lat, lng);
-        if (!this.map.getBounds().contains(markerLatLng)) {
-          this.map.panTo(markerLatLng, { animate: true });
-        }
+    } else if (!this.userMovedMap) {
+      this.map.setView([lat, lng], this.map.getZoom() || 6);
+    } else {
+      const markerLatLng = L.latLng(lat, lng);
+      if (!this.map.getBounds().contains(markerLatLng)) {
+        this.map.panTo(markerLatLng, { animate: true });
       }
     }
   }
 
   // =============================================
-  // 9. GET DESTINATION COORDINATES
+  // 9. GET DESTINATION COORDINATES (from places JSON)
   // =============================================
   getDestinationCoords(destName) {
-    const knownCoords = {
-      'Tesla HQ': { lat: 30.2655, lng: -97.7044 },
-      'SpaceX HQ': { lat: 33.9207, lng: -118.3271 },
-      'xAI HQ': { lat: 37.4450, lng: -122.1470 },
-      'The Boring Company HQ': { lat: 30.2455, lng: -97.7120 },
-      'Neuralink HQ': { lat: 37.4880, lng: -121.9380 },
-      'Bel Air Mansion': { lat: 34.0882, lng: -118.4420 },
-      'Manhattan Penthouse': { lat: 40.7773, lng: -73.9760 },
-      'Austin Ranch': { lat: 30.2500, lng: -97.5000 },
-      'Lake Austin Property': { lat: 30.3140, lng: -97.8680 },
-      'Jackson Hole Property': { lat: 43.4800, lng: -110.7620 },
-      'Kimbal\'s Farm': { lat: 40.0145, lng: -105.2705 },
-      'Kimbal\'s NYC Restaurant': { lat: 40.7422, lng: -73.9885 },
-      'Maye\'s NYC Apartment': { lat: 40.7580, lng: -73.9855 },
-      'Maye\'s LA Residence': { lat: 34.0522, lng: -118.2437 },
-      'Grimes\' Malibu House': { lat: 34.0250, lng: -118.7800 },
-      'Larry Ellison\'s Lanai Estate': { lat: 20.6789, lng: -156.0000 },
-      'Peter Thiel\'s LA Mansion': { lat: 34.0845, lng: -118.4485 },
-      'Miami (F1/Events)': { lat: 25.7617, lng: -80.1918 },
-      'Las Vegas (UFC/Events)': { lat: 36.1699, lng: -115.1398 },
-      'Sun Valley, Idaho': { lat: 43.6941, lng: -114.3521 },
-      'Boca Chica (SpaceX Launch)': { lat: 25.9973, lng: -97.1560 },
-    };
-    
-    if (knownCoords[destName]) return knownCoords[destName];
-    
-    for (const [key, coords] of Object.entries(knownCoords)) {
-      if (destName.includes(key) || key.includes(destName)) {
-        return coords;
+    if (!destName) return null;
+    if (this.placesByName[destName]) {
+      const p = this.placesByName[destName];
+      return { lat: p.lat, lng: p.lng };
+    }
+    for (const [name, p] of Object.entries(this.placesByName)) {
+      if (destName.includes(name) || name.includes(destName)) {
+        return { lat: p.lat, lng: p.lng };
       }
     }
-    
     return null;
   }
 
@@ -593,15 +625,36 @@ class ElonTracker {
       d.statusState.className = `state ${stateInfo.color}`;
     }
     
-    const badgeText = this.isLiveMode ? '● LIVE' : '⏸️ PAUSED';
+    const meta = data._meta || {};
+    let badgeText = this.isLiveMode ? '● LIVE' : '⏸️ PAUSED';
+    if (meta.isStale) badgeText = '⚠ STALE';
     if (d.statusBadge.textContent !== badgeText) {
       d.statusBadge.textContent = badgeText;
-      d.statusBadge.style.color = this.isLiveMode ? '#00ff88' : '#ffaa00';
+      d.statusBadge.style.color = meta.isStale ? '#ffaa00' : (this.isLiveMode ? '#00ff88' : '#ffaa00');
     }
     
     const locationText = data.current_location || 'Unknown';
     if (d.currentLocation.textContent !== locationText) {
       d.currentLocation.textContent = locationText;
+    }
+
+    if (d.observedCoords) {
+      const pos = this.getPosition(data);
+      const obsText = pos
+        ? `${pos.lat.toFixed(4)}, ${pos.lng.toFixed(4)}`
+        : 'No observation yet';
+      if (d.observedCoords.textContent !== obsText) {
+        d.observedCoords.textContent = obsText;
+      }
+    }
+
+    if (d.dataMeta) {
+      const age = meta.flightAge != null ? `${meta.flightAge}s` : (data.observed_age != null ? `${data.observed_age}s` : '—');
+      const source = meta.inferenceSource || 'none';
+      const metaText = `Source: ${source} · Age: ${age}${meta.isStale ? ' · STALE' : ''}`;
+      if (d.dataMeta.textContent !== metaText) {
+        d.dataMeta.textContent = metaText;
+      }
     }
     
     const destEl = d.destination;

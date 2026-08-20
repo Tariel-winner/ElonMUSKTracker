@@ -57,6 +57,12 @@ function generateConclusion(flight, trafficData) {
     );
 
     let confidence = 0.0;
+    // Base from geometry (places weight × proximity), not only historical anecdotes
+    if (nearest.score != null) {
+      confidence += Math.min(0.45, 0.25 + nearest.score * 0.35);
+    } else if (nearest.dist != null) {
+      confidence += Math.max(0.25, 0.45 * (1 - nearest.dist / 50));
+    }
     if (historicalConfidence > 0.5) {
       confidence += historicalConfidence * 0.6;
       conclusion.reasoning.push(
@@ -115,25 +121,29 @@ function generateConclusion(flight, trafficData) {
   return conclusion;
 }
 
-// Helper: Find properties within X miles of given coords
+// Helper: Find properties within radius using places[] schema
 function findNearbyProperties(lat, lng, radiusMiles) {
   const results = [];
-  const allProps = [
-    ...staticData.corporate_hqs,
-    ...staticData.residences,
-    ...(staticData.family_properties || []),
-    ...(staticData.friends_properties || []),
-    ...(staticData.frequent_destinations || [])
-  ];
-  
-  for (const prop of allProps) {
-    if (!prop.lat || !prop.lng) continue;
+  const {
+    getPlacesFor,
+    placeMaxRadius,
+    placeWeight,
+    coordQualityPenalty,
+  } = staticData;
+
+  for (const prop of getPlacesFor('grounded')) {
+    if (!Number.isFinite(prop.lat) || !Number.isFinite(prop.lng)) continue;
     const dist = haversine(lat, lng, prop.lat, prop.lng);
-    if (dist <= radiusMiles) {
-      results.push({ ...prop, dist });
+    const maxR = Math.min(placeMaxRadius(prop, radiusMiles), radiusMiles);
+    if (dist <= maxR) {
+      results.push({
+        ...prop,
+        dist,
+        score: (1 - dist / maxR) * placeWeight(prop) * coordQualityPenalty(prop),
+      });
     }
   }
-  return results;
+  return results.sort((a, b) => b.score - a.score);
 }
 
 // Helper: Haversine formula for distance in miles
@@ -147,11 +157,11 @@ function haversine(lat1, lon1, lat2, lon2) {
 
 // Helper: Get airport name from coordinates
 function getAirportByCoords(lat, lng) {
-  const airports = staticData.airports;
+  const airports = staticData.airports || [];
   let nearest = null;
   let minDist = Infinity;
   for (const apt of airports) {
-    if (!apt.lat || !apt.lng) continue;
+    if (!Number.isFinite(apt.lat) || !Number.isFinite(apt.lng)) continue;
     const d = haversine(lat, lng, apt.lat, apt.lng);
     if (d < minDist) { minDist = d; nearest = apt; }
   }
@@ -167,54 +177,65 @@ function getHistoricalConfidence(from, to) {
   return 0.0;
 }
 
-// Helper: Get route between two points
+// Helper: Get route between two points (legacy routes + places by name)
 function getRoute(lat1, lng1, lat2, lng2) {
   const routes = staticData.routes || [];
+  const places = staticData.getPlaces();
   for (const r of routes) {
-    const fromAirport = staticData.airports.find(a => a.name === r.from);
-    const toProp = staticData.residences.find(p => p.name === r.to) || 
-                   staticData.corporate_hqs.find(p => p.name === r.to);
+    const fromAirport = (staticData.airports || []).find(a => a.name === r.from || a.code === r.from_airport);
+    const toName = r.to || r.to_place;
+    const toProp = places.find(p => p.name === toName || p.id === toName);
     if (fromAirport && toProp) {
       const d1 = haversine(lat1, lng1, fromAirport.lat, fromAirport.lng);
       const d2 = haversine(lat2, lng2, toProp.lat, toProp.lng);
       if (d1 < 5 && d2 < 5) {
-        return { street: r.route.split('→')[0].trim() };
+        const street = (r.route || 'route').split('→')[0].trim();
+        return { street };
       }
     }
   }
   return { street: 'unknown' };
 }
 
-// Helper: Predict destination by heading (ALL properties)
+// Helper: Predict destination by heading using places[]
 function predictDestinationByHeading(lat, lng, heading) {
-  if (!heading || heading === 0) return null;
-  
-  const allProps = [
-    ...staticData.corporate_hqs,
-    ...staticData.residences,
-    ...(staticData.family_properties || []),
-    ...(staticData.friends_properties || []),
-    ...(staticData.frequent_destinations || [])
-  ];
-  
+  if (heading === null || heading === undefined || isNaN(heading)) return null;
+
+  const {
+    getPlacesFor,
+    placeMaxRadius,
+    placeWeight,
+    coordQualityPenalty,
+  } = staticData;
+
   let best = null;
   let bestScore = 0;
-  
-  for (const prop of allProps) {
-    if (!prop.lat || !prop.lng) continue;
-    const dx = prop.lng - lng;
-    const dy = prop.lat - lat;
-    const angle = Math.atan2(dx, dy) * 180 / Math.PI;
-    const diff = Math.abs((heading - angle + 360) % 360);
-    if (diff < 90) {
-      let score = 1 - (diff / 90);
-      if (prop.type === 'family') score += 0.05;
-      if (prop.type === 'friend') score += 0.03;
-      if (prop.type === 'event') score += 0.02;
-      if (score > bestScore) {
-        bestScore = score;
-        best = prop;
-      }
+  const MAX_ANGLE = 45;
+
+  for (const prop of getPlacesFor('in_flight')) {
+    if (!Number.isFinite(prop.lat) || !Number.isFinite(prop.lng)) continue;
+    const distance = haversine(lat, lng, prop.lat, prop.lng);
+    const maxR = placeMaxRadius(prop, 500);
+    if (distance > Math.max(maxR * 8, 200)) continue;
+
+    const φ1 = lat * Math.PI / 180;
+    const φ2 = prop.lat * Math.PI / 180;
+    const Δλ = (prop.lng - lng) * Math.PI / 180;
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    let bearing = Math.atan2(y, x) * 180 / Math.PI;
+    bearing = (bearing + 360) % 360;
+
+    let diff = ((heading - bearing) % 360 + 360) % 360;
+    if (diff > 180) diff = 360 - diff;
+    if (diff >= MAX_ANGLE) continue;
+
+    let score = (1 - diff / MAX_ANGLE) * placeWeight(prop) * coordQualityPenalty(prop);
+    score *= (1 - Math.min(distance / 200, 1) * 0.35);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = prop;
     }
   }
   return best;

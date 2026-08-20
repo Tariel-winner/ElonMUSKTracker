@@ -1,15 +1,28 @@
 // location-inference.js
-// Handles inference when jet is on the ground
-// Now includes ALL property types: corporate HQs, residences, family, friends, events
+// Grounded inference using places[] schema (weight, max_radius, use_for, type)
 
 const { haversine } = require('./ai-correlator');
+const {
+  getPlacesFor,
+  placeMaxRadius,
+  placeWeight,
+  coordQualityPenalty,
+  placeType,
+  placeCategory,
+} = require('./static-data');
+
+const WORK_START_HOUR = 9;
+const WORK_END_HOUR = 17;
+const DEFAULT_MAX_MILES = 50;
 
 function inferLocationWhenGrounded(lastKnown, staticData, cache, newsData) {
   const now = new Date();
-  const day = now.getDay(); // 0=Sunday, 1=Monday...
-  const hour = now.getHours();
+  const hour = now.getUTCHours();
+  const day = now.getUTCDay();
+
   const isWeekend = day === 0 || day === 6;
-  const isWorkHours = hour >= 9 && hour <= 17 && !isWeekend;
+  const isWorkHours = hour >= WORK_START_HOUR && hour <= WORK_END_HOUR && !isWeekend;
+  const isEvening = hour >= 18 || hour <= 6;
 
   const conclusion = {
     state: 'grounded',
@@ -18,153 +31,111 @@ function inferLocationWhenGrounded(lastKnown, staticData, cache, newsData) {
     confidence: 0.0,
     reasoning: [],
     prediction_type: 'grounded_inference',
-    timestamp: now.toISOString()
+    timestamp: now.toISOString(),
   };
 
-  // --- COMBINE ALL PROPERTY TYPES ---
-  const allProperties = [
-    ...(staticData.corporate_hqs || []),
-    ...(staticData.residences || []),
-    ...(staticData.family_properties || []),
-    ...(staticData.friends_properties || []),
-    ...(staticData.frequent_destinations || [])
-  ];
+  const allProperties = getPlacesFor('grounded');
 
-  // --- FILTER BY TYPE FOR TIME-BASED INFERENCE ---
-  const residences = allProperties.filter(p => p.type === 'residence' || p.type === 'family');
-  const hqs = allProperties.filter(p => p.type === 'corporate_hq');
-  const vacationProps = allProperties.filter(p => p.type === 'residence' || p.type === 'family' || p.type === 'friend');
+  const residences = allProperties.filter((p) => {
+    const t = placeType(p);
+    const c = placeCategory(p);
+    return t === 'home' || t === 'residence' || t === 'family' || t === 'friend'
+      || c === 'residence' || c === 'family' || c === 'friend';
+  });
+  const hqs = allProperties.filter((p) => {
+    const t = placeType(p);
+    const c = placeCategory(p);
+    return t === 'work' || c === 'corporate_hq';
+  });
+  const weekendPlaces = allProperties.filter((p) => {
+    const t = placeType(p);
+    const c = placeCategory(p);
+    return t === 'home' || t === 'residence' || t === 'family' || t === 'friend' || t === 'vacation'
+      || c === 'residence' || c === 'family' || c === 'friend' || c === 'vacation';
+  });
 
-  // 1. Time-based inference
-  if (isWeekend) {
-    conclusion.reasoning.push('Weekend - likely at a residence, vacation, or family property.');
-    const nearest = findNearest(lastKnown.lat, lastKnown.lng, vacationProps);
-    if (nearest) {
-      conclusion.destination = nearest.name;
-      conclusion.confidence = 0.4;
-      // Add context about property type
-      if (nearest.type === 'family') {
-        const rel = nearest.relationship || 'family';
-        const owner = nearest.owner || 'relative';
-        conclusion.reasoning.push(`Weekend pattern: likely at ${owner}'s ${rel} property (${nearest.name}).`);
-      } else if (nearest.type === 'friend') {
-        const owner = nearest.owner || 'friend';
-        conclusion.reasoning.push(`Weekend pattern: likely at ${owner}'s property (${nearest.name}).`);
-      } else {
-        conclusion.reasoning.push(`Weekend pattern: likely at ${nearest.name}.`);
+  function findBest(lat, lng, properties) {
+    if (!properties || properties.length === 0) return null;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const prop of properties) {
+      if (!Number.isFinite(prop.lat) || !Number.isFinite(prop.lng)) continue;
+      const dist = haversine(lat, lng, prop.lat, prop.lng);
+      const radius = placeMaxRadius(prop, DEFAULT_MAX_MILES);
+      if (dist >= radius) continue;
+      const proximity = 1 - dist / radius;
+      const score = proximity * placeWeight(prop) * coordQualityPenalty(prop);
+      if (score > bestScore) {
+        bestScore = score;
+        best = prop;
       }
     }
-  } else if (isWorkHours) {
-    conclusion.reasoning.push('Work hours - likely at a corporate HQ or business location.');
-    const nearest = findNearest(lastKnown.lat, lastKnown.lng, hqs);
-    if (nearest) {
-      conclusion.destination = nearest.name;
-      conclusion.confidence = 0.5;
-      conclusion.reasoning.push(`Work hours: likely at ${nearest.name}.`);
-    } else {
-      // If no HQ nearby, check if there's a corporate event
-      const events = allProperties.filter(p => p.type === 'event' || p.type === 'corporate');
-      const nearestEvent = findNearest(lastKnown.lat, lastKnown.lng, events);
-      if (nearestEvent) {
-        conclusion.destination = nearestEvent.name;
-        conclusion.confidence = 0.35;
-        conclusion.reasoning.push(`Work hours: possible event at ${nearestEvent.name}.`);
-      }
-    }
-  } else {
-    conclusion.reasoning.push('Evening - likely at a residence, family, or friend property.');
-    const nearest = findNearest(lastKnown.lat, lastKnown.lng, residences);
-    if (nearest) {
-      conclusion.destination = nearest.name;
-      conclusion.confidence = 0.6;
-      if (nearest.type === 'family') {
-        const rel = nearest.relationship || 'family';
-        const owner = nearest.owner || 'relative';
-        conclusion.reasoning.push(`Evening: likely at ${owner}'s ${rel} property (${nearest.name}).`);
-      } else {
-        conclusion.reasoning.push(`Evening: likely at ${nearest.name}.`);
-      }
-    }
+    return best;
   }
 
-  // 2. Check news events
+  let candidate = null;
+  let candidateType = '';
+
+  if (isWeekend) {
+    conclusion.reasoning.push(
+      `Weekend (${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day]}) — prefer home/weekend places.`
+    );
+    candidate = findBest(lastKnown.lat, lastKnown.lng, weekendPlaces);
+    candidateType = 'weekend';
+  } else if (isWorkHours) {
+    conclusion.reasoning.push(`Work hours (UTC ${hour}:00) — prefer work places.`);
+    candidate = findBest(lastKnown.lat, lastKnown.lng, hqs);
+    candidateType = 'work';
+  } else if (isEvening) {
+    conclusion.reasoning.push(`Evening (UTC ${hour}:00) — prefer residence.`);
+    candidate = findBest(lastKnown.lat, lastKnown.lng, residences);
+    candidateType = 'evening';
+  } else {
+    // Midday gap: any grounded place nearby
+    candidate = findBest(lastKnown.lat, lastKnown.lng, allProperties);
+    candidateType = 'nearby';
+  }
+
+  if (candidate) {
+    const dist = haversine(lastKnown.lat, lastKnown.lng, candidate.lat, candidate.lng);
+    const quality = candidate.coord_quality === 'precise' ? 0.4 : 0.3;
+    conclusion.destination = candidate.name;
+    conclusion.confidence = Math.min(quality * placeWeight(candidate), 0.55);
+    conclusion.reasoning.push(
+      `Nearest ${candidateType} place: ${candidate.name} (${dist.toFixed(0)} mi, weight ${placeWeight(candidate)}).`
+    );
+  }
+
   if (newsData && newsData.articles && newsData.articles.length > 0) {
-    for (const article of newsData.articles) {
-      const title = article.title.toLowerCase();
+    for (const article of newsData.articles.slice(0, 5)) {
+      const title = (article.title || '').toLowerCase();
       const content = (article.content || '').toLowerCase();
-      
-      // Check all properties for mentions
       for (const prop of allProperties) {
-        const propName = prop.name.toLowerCase();
+        const propName = (prop.name || '').toLowerCase();
         const ownerName = (prop.owner || '').toLowerCase();
-        if (title.includes(propName) || content.includes(propName) ||
-            title.includes(ownerName) || content.includes(ownerName)) {
+        const nameMatch = propName && (title.includes(propName) || content.includes(propName));
+        const ownerMatch = ownerName && (title.includes(ownerName) || content.includes(ownerName));
+        if (nameMatch && ownerMatch) {
           conclusion.destination = prop.name;
-          conclusion.confidence = Math.min(conclusion.confidence + 0.2, 0.95);
-          const source = prop.type === 'family' ? 'family' : 
-                         prop.type === 'friend' ? "friend's" : '';
-          conclusion.reasoning.push(`📰 News event: "${article.title}" mentions ${source} ${prop.name}.`);
+          conclusion.confidence = Math.min(conclusion.confidence + 0.15, 0.7);
+          conclusion.reasoning.push(`News: "${article.title}" mentions ${prop.name}.`);
           break;
         }
       }
     }
   }
 
-  // 3. Default fallback if nothing found
-  if (conclusion.destination === 'Unknown') {
-    const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day];
-    const timeOfDay = isWorkHours ? 'work' : 'evening';
-    conclusion.reasoning.push(`No specific data - using historical patterns for ${dayName} ${timeOfDay}.`);
-    conclusion.confidence = 0.15;
-    
-    if (isWorkHours && day >= 1 && day <= 5) {
-      // Check if there's any corporate property nearby
-      const nearestHQ = findNearest(lastKnown.lat, lastKnown.lng, hqs);
-      if (nearestHQ) {
-        conclusion.destination = nearestHQ.name + ' (historical pattern)';
-      } else {
-        conclusion.destination = 'Tesla HQ or SpaceX HQ (historical pattern)';
-      }
-    } else if (isWeekend) {
-      const nearestVacation = findNearest(lastKnown.lat, lastKnown.lng, vacationProps);
-      if (nearestVacation) {
-        conclusion.destination = nearestVacation.name + ' (historical pattern)';
-      } else {
-        conclusion.destination = 'Bel Air Mansion or Austin Ranch (weekend pattern)';
-      }
-    } else {
-      const nearestResidence = findNearest(lastKnown.lat, lastKnown.lng, residences);
-      if (nearestResidence) {
-        conclusion.destination = nearestResidence.name + ' (historical pattern)';
-      } else {
-        conclusion.destination = 'Manhattan Penthouse (evening pattern)';
-      }
-    }
+  if (conclusion.destination === 'Unknown' || conclusion.confidence < 0.1) {
+    conclusion.destination = 'Unknown';
+    conclusion.confidence = 0;
+    conclusion.reasoning.push('No grounded place within radius — staying Unknown.');
   }
 
-  if (lastKnown && lastKnown.locationName) {
+  if (lastKnown && lastKnown.locationName && lastKnown.locationName !== 'Unknown (no data)') {
     conclusion.current_location = lastKnown.locationName;
   }
 
   return conclusion;
-}
-
-// Helper: Find nearest property to coordinates
-function findNearest(lat, lng, properties) {
-  if (!properties || properties.length === 0) return null;
-  
-  let nearest = null;
-  let minDist = Infinity;
-  
-  for (const prop of properties) {
-    if (!prop.lat || !prop.lng) continue;
-    const dist = haversine(lat, lng, prop.lat, prop.lng);
-    if (dist < minDist) {
-      minDist = dist;
-      nearest = prop;
-    }
-  }
-  return nearest;
 }
 
 module.exports = { inferLocationWhenGrounded };

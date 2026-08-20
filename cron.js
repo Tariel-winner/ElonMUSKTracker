@@ -1,19 +1,29 @@
 const fetch = require('node-fetch');
 const fs = require('fs');
 const db = require('./db');
-const cache = require('./memory-cache');
+const { cache, updateObservation, updateInference, clearInference, getCurrentState } = require('./memory-cache');
 const { generateConclusion } = require('./ai-correlator');
 const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
 const { askDeepSeek } = require('./deepseek-client');
 
 // --- CONFIGURATION ---
-// Set BRIDGE_URL in Railway environment variables
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3001';
-
-// --- Railway Local Cache (fallback when bridge is down) ---
 const RAILWAY_CACHE_FILE = '/tmp/railway_cache.json';
+
+// --- Constants ---
+const MAX_PROPERTY_DISTANCE_MILES = 50;
+const MAX_HEADING_ANGLE_DEG = 45;
+const MIN_CONFIDENCE_FOR_DESTINATION = 0.3;
+
 let railwayCache = null;
+let lastDeepSeekCallTime = 0;
+let lastDeepSeekResult = null;
+const DEEPSEEK_CACHE_TTL = 3600000;
+
+// =============================================
+// HELPERS
+// =============================================
 
 function loadRailwayCache() {
   try {
@@ -23,9 +33,7 @@ function loadRailwayCache() {
       console.log('[CRON] ✅ Loaded Railway cache from', railwayCache.timestamp);
       return true;
     }
-  } catch (e) {
-    console.log('[CRON] No Railway cache found');
-  }
+  } catch (e) {}
   return false;
 }
 
@@ -35,72 +43,7 @@ function saveRailwayCache(data) {
       timestamp: new Date().toISOString(),
       data: data
     }));
-    console.log('[CRON] 💾 Saved Railway cache');
-  } catch (e) {
-    console.error('[CRON] Failed to save cache:', e.message);
-  }
-}
-
-// --- DeepSeek API Caching ---
-let lastDeepSeekCallTime = 0;
-let lastDeepSeekResult = null;
-const DEEPSEEK_CACHE_TTL = 3600000; // 60 minutes
-
-// --- Helper Functions ---
-function normalizeLocation(name) {
-  if (!name) return name;
-  const map = {
-    'Austin-Bergstrom Airport': 'Tesla HQ',
-    'Teterboro Airport': 'Manhattan Penthouse',
-    'Van Nuys Airport': 'Bel Air Mansion',
-    'Austin Ranch': 'Austin Ranch',
-    'Bel Air Mansion': 'Bel Air Mansion',
-    'Manhattan Penthouse': 'Manhattan Penthouse',
-    'SpaceX HQ': 'SpaceX HQ',
-    'Tesla HQ': 'Tesla HQ',
-    'xAI HQ': 'xAI HQ',
-    'The Boring Company HQ': 'The Boring Company HQ',
-    'Neuralink HQ': 'Neuralink HQ',
-    'Lake Austin Property': 'Lake Austin Property',
-    'Jackson Hole Property': 'Jackson Hole Property',
-  };
-  return map[name] || name;
-}
-
-function calculateHeadingFromPositions(lat1, lon1, lat2, lon2) {
-  if (!lat1 || !lon1 || !lat2 || !lon2) return null;
-  const lat1Rad = lat1 * Math.PI / 180;
-  const lon1Rad = lon1 * Math.PI / 180;
-  const lat2Rad = lat2 * Math.PI / 180;
-  const lon2Rad = lon2 * Math.PI / 180;
-  const dLon = lon2Rad - lon1Rad;
-  const y = Math.sin(dLon) * Math.cos(lat2Rad);
-  const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - 
-            Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
-  let heading = Math.atan2(y, x) * 180 / Math.PI;
-  heading = (heading + 360) % 360;
-  return heading;
-}
-
-function findNearestProperty(lat, lng) {
-  const allProps = [
-    ...staticData.corporate_hqs,
-    ...staticData.residences,
-    ...(staticData.family_properties || []),
-    ...(staticData.friends_properties || []),
-    ...(staticData.frequent_destinations || [])
-  ];
-  let nearest = null;
-  let minDist = Infinity;
-  for (const prop of allProps) {
-    if (!prop.lat || !prop.lng) continue;
-    const d = haversine(lat, lng, prop.lat, prop.lng);
-    if (d < minDist) {
-      minDist = d;
-      nearest = prop;
-    }
-  }
-  return nearest;
+  } catch (e) {}
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -111,55 +54,118 @@ function haversine(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-function predictDestinationByHeading(lat, lng, heading) {
-  if (!heading || heading === 0) return null;
-  const allProps = [
-    ...staticData.corporate_hqs,
-    ...staticData.residences,
-    ...(staticData.family_properties || []),
-    ...(staticData.friends_properties || []),
-    ...(staticData.frequent_destinations || [])
-  ];
-  let best = null;
-  let bestScore = 0;
-  for (const prop of allProps) {
-    if (!prop.lat || !prop.lng) continue;
-    const dx = prop.lng - lng;
-    const dy = prop.lat - lat;
-    const angle = Math.atan2(dx, dy) * 180 / Math.PI;
-    const diff = Math.abs((heading - angle + 360) % 360);
-    if (diff < 90) {
-      let score = 1 - (diff / 90);
-      if (prop.type === 'family') score += 0.05;
-      if (prop.type === 'friend') score += 0.03;
-      if (prop.type === 'event') score += 0.02;
-      if (score > bestScore) {
-        bestScore = score;
-        best = prop;
-      }
+function calculateBearing(lat1, lon1, lat2, lon2) {
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return null;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  let θ = Math.atan2(y, x) * 180 / Math.PI;
+  return (θ + 360) % 360;
+}
+
+function angleDiff(a, b) {
+  let diff = ((a - b) % 360 + 360) % 360;
+  if (diff > 180) diff = 360 - diff;
+  return diff;
+}
+
+function isValidHeading(h) {
+  return h !== null && h !== undefined && !isNaN(h);
+}
+
+/**
+ * Nearest place using places[] + per-place max_radius + weight.
+ * useCase: 'in_flight' | 'grounded'
+ */
+function findNearestProperty(lat, lng, maxDistance, useCase = 'grounded') {
+  const { getPlacesFor, placeMaxRadius, placeWeight, coordQualityPenalty } = staticData;
+  const candidates = getPlacesFor(useCase);
+  
+  let nearest = null;
+  let bestScore = -Infinity;
+  
+  for (const prop of candidates) {
+    if (!Number.isFinite(prop.lat) || !Number.isFinite(prop.lng)) continue;
+    const d = haversine(lat, lng, prop.lat, prop.lng);
+    const radius = Math.min(placeMaxRadius(prop, maxDistance), maxDistance);
+    if (d >= radius) continue;
+    
+    // Closer + higher weight + better coords wins
+    const proximity = 1 - (d / radius);
+    const score = proximity * placeWeight(prop) * coordQualityPenalty(prop);
+    if (score > bestScore) {
+      bestScore = score;
+      nearest = prop;
     }
   }
+  return nearest;
+}
+
+/**
+ * Heading → destination using places[] fields (use_for, max_radius, weight).
+ */
+function predictDestinationByHeading(lat, lng, heading) {
+  if (!isValidHeading(heading)) return null;
+  
+  const { getPlacesFor, placeMaxRadius, placeWeight, coordQualityPenalty, placeType } = staticData;
+  const candidates = getPlacesFor('in_flight');
+  
+  let best = null;
+  let bestScore = 0;
+  
+  for (const prop of candidates) {
+    if (!Number.isFinite(prop.lat) || !Number.isFinite(prop.lng)) continue;
+    
+    const distance = haversine(lat, lng, prop.lat, prop.lng);
+    const maxR = placeMaxRadius(prop, 500);
+    // In-flight targets can be farther than grounded radius, but still capped
+    if (distance > Math.max(maxR * 8, 200)) continue;
+    
+    const bearing = calculateBearing(lat, lng, prop.lat, prop.lng);
+    if (bearing === null) continue;
+    
+    const diff = angleDiff(heading, bearing);
+    if (diff >= MAX_HEADING_ANGLE_DEG) continue;
+    
+    let score = (1 - diff / MAX_HEADING_ANGLE_DEG) * placeWeight(prop) * coordQualityPenalty(prop);
+    const distancePenalty = Math.min(distance / 200, 1);
+    score *= (1 - distancePenalty * 0.35);
+    
+    const t = placeType(prop);
+    if (t === 'family' || prop.category === 'family') score += 0.03;
+    if (t === 'friend' || prop.category === 'friend') score += 0.02;
+    
+    if (score > bestScore) {
+      bestScore = score;
+      best = prop;
+    }
+  }
+  
   return best;
 }
 
-// --- MAIN CRON FUNCTION ---
+// =============================================
+// MAIN CRON FUNCTION
+// =============================================
+
 async function runCronJob() {
   console.log('[CRON] Fetching data at', new Date().toISOString());
 
   try {
-    // --- 1. Fetch from Bridge (with ngrok bypass header) ---
+    // --- 1. Fetch from Bridge ---
     let adsbData = null;
     let fromCache = false;
     let dataSource = 'unknown';
     
     try {
       console.log('[CRON] 📡 Calling bridge...');
-      
       const bridgeResponse = await fetch(`${BRIDGE_URL}/api/flights`, {
         timeout: 20000,
         headers: {
-          'ngrok-skip-browser-warning': 'true',  // Bypass ngrok warning page
-          'User-Agent': 'ElonTracker/1.0'         // Custom user agent
+          'ngrok-skip-browser-warning': 'true',
+          'User-Agent': 'ElonTracker/1.0'
         }
       });
       
@@ -169,11 +175,9 @@ async function runCronJob() {
           adsbData = bridgeResult.data;
           dataSource = bridgeResult.source || 'live';
           console.log(`[CRON] ✅ Data from bridge (${dataSource})`);
-          
-          // Save to Railway cache for fallback
           saveRailwayCache(adsbData);
         } else {
-          throw new Error('Bridge returned invalid data structure');
+          throw new Error('Bridge returned invalid data');
         }
       } else {
         throw new Error(`Bridge responded with ${bridgeResponse.status}`);
@@ -182,46 +186,36 @@ async function runCronJob() {
       console.warn('[CRON] ⚠️ Bridge error:', bridgeError.message);
       dataSource = 'cache_fallback';
       
-      // Try Railway file cache
       if (loadRailwayCache() && railwayCache && railwayCache.data) {
         adsbData = railwayCache.data;
         fromCache = true;
         console.log('[CRON] ✅ Using Railway cache from', railwayCache.timestamp);
-      } 
-      // Fallback to memory cache
-      else if (cache.currentFlight) {
-        console.log('[CRON] ⚠️ Using memory cache (last known flight state)');
-        // Don't return - keep using the cached flight data
-        // The flightState will be null, and we'll use the cached flight data below
-      } 
-      else {
-        throw new Error('No data available from any source');
+      } else if (cache.currentFlight) {
+        console.log('[CRON] ⚠️ Using memory cache');
+      } else {
+        throw new Error('No data available');
       }
     }
     
-    // --- 2. Process the data ---
-    // If we have adsbData from bridge or cache, use it to find flight
+    // --- 2. Find flight ---
     let flightState = null;
     let isUsingCachedFlight = false;
     
     if (adsbData) {
       const states = adsbData.states || [];
       flightState = states.find(f => f[1] && f[1].trim() === 'N628TS');
-      console.log(`[CRON] Found ${states.length} states in data, N628TS: ${flightState ? '✅ found' : '❌ not found'}`);
+      console.log(`[CRON] N628TS: ${flightState ? '✅ found' : '❌ not found'}`);
     }
     
-    // If no flight in current data but we have a cached flight in memory, use it
     if (!flightState && cache.currentFlight) {
-      console.log('[CRON] ⚠️ No flight in current data, keeping previous flight state in memory');
+      console.log('[CRON] ⚠️ Using cached flight data');
       isUsingCachedFlight = true;
-      // We'll use the cached flight data below
     }
     
     const now = new Date().toISOString();
 
-    // --- 3. IF JET IS FLYING (or we have cached flight data) ---
+    // --- 3. IF JET IS FLYING ---
     if (flightState || isUsingCachedFlight) {
-      // Use flightState if available, otherwise use cached flight
       const flight = flightState ? {
         lat: flightState[6],
         lon: flightState[5],
@@ -238,10 +232,10 @@ async function runCronJob() {
       if (flightState) {
         console.log(`[CRON] Jet found: ${flight.callsign} at ${flight.lat}, ${flight.lon}`);
       } else {
-        console.log(`[CRON] Using cached flight data from ${cache.currentFlight.timestamp}`);
+        console.log(`[CRON] Using cached flight from ${cache.currentFlight.timestamp}`);
       }
 
-      // Insert raw flight data (if live data, not cached)
+      // Insert raw flight data (only if live)
       if (flightState) {
         db.run(
           `INSERT INTO raw_flight_data (timestamp, lat, lng, altitude, speed, heading, on_ground, vert_rate, raw_json)
@@ -254,10 +248,11 @@ async function runCronJob() {
       const prev = cache.currentFlight;
       let trafficData = null;
 
-      // Reset DeepSeek cache if jet took off
+      // Reset DeepSeek cache on takeoff
       if (prev && prev.on_ground === 1 && flight.on_ground === 0) {
         lastDeepSeekCallTime = 0;
         lastDeepSeekResult = null;
+        clearInference(); // ✅ Use helper
         console.log('[CRON] Jet took off - DeepSeek cache reset.');
       }
 
@@ -269,9 +264,9 @@ async function runCronJob() {
 
         lastDeepSeekCallTime = 0;
         lastDeepSeekResult = null;
+        clearInference(); // ✅ Use helper
         console.log('[CRON] Landing detected - DeepSeek cache reset.');
 
-        // Get traffic data if available
         try {
           const wazeUrl = `https://www.waze.com/row-rtserver/web/TGeoRSS?tk=0&format=JSON&lon=${flight.lon}&lat=${flight.lat}&zoom=12`;
           const wazeRes = await fetch(wazeUrl);
@@ -281,25 +276,23 @@ async function runCronJob() {
         }
       }
 
-      // --- Heading fallback ---
+      // --- Heading handling (0° = North is valid) ---
       let heading = flight.track;
       let headingSource = 'OpenSky';
       
-      const hasValidHeading = heading !== null && heading !== undefined && heading !== 0;
-      
-      if (!hasValidHeading) {
-        if (cache.previousFlight && cache.previousFlight.heading && cache.previousFlight.heading !== 0) {
+      if (!isValidHeading(heading)) {
+        if (cache.previousFlight && isValidHeading(cache.previousFlight.heading)) {
           heading = cache.previousFlight.heading;
           headingSource = 'cache';
           console.log(`[CRON] Using cached heading: ${heading.toFixed(1)}°`);
-        } else if (cache.previousFlight && cache.previousFlight.lat && cache.previousFlight.lng) {
-          const calculated = calculateHeadingFromPositions(
+        } else if (cache.previousFlight && Number.isFinite(cache.previousFlight.lat) && Number.isFinite(cache.previousFlight.lng)) {
+          const calculated = calculateBearing(
             cache.previousFlight.lat,
             cache.previousFlight.lng,
             flight.lat,
             flight.lon
           );
-          if (calculated !== null && calculated !== 0) {
+          if (calculated !== null && !isNaN(calculated)) {
             heading = calculated;
             headingSource = 'calculated';
             console.log(`[CRON] Calculated heading: ${heading.toFixed(1)}°`);
@@ -320,30 +313,42 @@ async function runCronJob() {
         vert_rate: flight.vert_rate || 0,
       }, trafficData);
 
-      // --- If destination Unknown, try heading prediction ---
-      if (conclusion.destination === 'Unknown' && heading && heading !== 0) {
-        const prediction = predictDestinationByHeading(flight.lat, flight.lng, heading);
+      // --- Heading prediction ---
+      if (conclusion.destination === 'Unknown' && isValidHeading(heading)) {
+        const prediction = predictDestinationByHeading(flight.lat, flight.lon, heading);
         if (prediction) {
-          conclusion.destination = prediction.name;
-          conclusion.confidence = Math.max(conclusion.confidence, 0.25);
-          conclusion.reasoning.push(`Heading ${heading.toFixed(1)}° points toward ${prediction.name}.`);
-          console.log(`[CRON] Heading ${heading.toFixed(1)}° → ${prediction.name}`);
+          const distance = haversine(flight.lat, flight.lon, prediction.lat, prediction.lng);
+          if (distance < 200) {
+            conclusion.destination = prediction.name;
+            conclusion.confidence = Math.max(conclusion.confidence, 0.25);
+            conclusion.reasoning.push(`Heading ${heading.toFixed(1)}° points toward ${prediction.name} (${distance.toFixed(0)} miles).`);
+            console.log(`[CRON] Heading ${heading.toFixed(1)}° → ${prediction.name} (${distance.toFixed(0)} mi)`);
+          }
         }
       }
 
       // --- Nearest property fallback ---
       if (conclusion.destination === 'Unknown') {
-        const nearest = findNearestProperty(flight.lat, flight.lng);
-        if (nearest && haversine(flight.lat, flight.lng, nearest.lat, nearest.lng) < 200) {
-          const dist = Math.round(haversine(flight.lat, flight.lng, nearest.lat, nearest.lng));
+        const useCase = flight.on_ground ? 'grounded' : 'in_flight';
+        const nearest = findNearestProperty(flight.lat, flight.lon, MAX_PROPERTY_DISTANCE_MILES, useCase);
+        if (nearest) {
+          const dist = haversine(flight.lat, flight.lon, nearest.lat, nearest.lng);
           conclusion.destination = nearest.name;
-          conclusion.confidence = Math.max(conclusion.confidence, 0.15);
-          conclusion.reasoning.push(`Using nearest property: ${nearest.name} (${dist} miles).`);
-          console.log(`[CRON] Nearest property: ${nearest.name} (${dist} miles)`);
+          conclusion.confidence = Math.max(conclusion.confidence, 0.32);
+          conclusion.reasoning.push(`Nearest property: ${nearest.name} (${dist.toFixed(0)} miles).`);
+          console.log(`[CRON] Nearest property: ${nearest.name} (${dist.toFixed(0)} mi)`);
+        } else {
+          conclusion.destination = 'Unknown';
+          conclusion.confidence = 0;
+          conclusion.reasoning.push('No nearby properties found.');
         }
       }
 
-      // Add data source info to conclusion
+      if (conclusion.confidence < MIN_CONFIDENCE_FOR_DESTINATION) {
+        conclusion.destination = 'Unknown';
+        conclusion.confidence = 0;
+      }
+
       conclusion.data_source = dataSource;
       conclusion.from_cache = fromCache || isUsingCachedFlight;
 
@@ -355,22 +360,28 @@ async function runCronJob() {
         (err) => { if (err) console.error('[DB] Insert conclusion error:', err); }
       );
 
-      // Update cache (only if we have live data, not cached)
+      // ✅ Update observation (FACT) if we have live data
       if (flightState) {
-        cache.previousFlight = cache.currentFlight;
-        cache.currentFlight = {
-          lat: flight.lat, lng: flight.lon, on_ground: flight.on_ground,
-          altitude: flight.alt_baro, speed: flight.gs, heading: flight.track,
-          vert_rate: flight.vert_rate, timestamp: now,
+        // Save previous BEFORE overwriting current
+        cache.previousFlight = cache.currentFlight ? { ...cache.currentFlight } : null;
+
+        const observation = {
+          lat: flight.lat,
+          lon: flight.lon,
+          lng: flight.lon,
+          on_ground: flight.on_ground,
+          heading: heading,
+          altitude: flight.alt_baro,
+          speed: flight.gs,
+          vert_rate: flight.vert_rate,
+          timestamp: now,
+          source: dataSource
         };
+        updateObservation(observation);
       }
       
-      cache.lastKnownLocation = {
-        lat: flight.lat, lng: flight.lon,
-        locationName: conclusion.current_location || 'Unknown',
-        timestamp: now
-      };
-      cache.latestConclusion = conclusion;
+      // ✅ Update inference (GUESS) with conclusion
+      updateInference(conclusion);
 
       console.log(`[CRON] State: ${conclusion.state}, Destination: ${conclusion.destination || 'Unknown'}, Confidence: ${conclusion.confidence}`);
       console.log(`[CRON] Data source: ${dataSource}${fromCache ? ' (cached)' : ''}`);
@@ -380,9 +391,11 @@ async function runCronJob() {
     else {
       console.log('[CRON] Jet not found - using ground inference.');
 
-      const lastKnown = cache.lastKnownLocation || {
-        lat: 34.0882, lng: -118.4420,
-        locationName: 'Bel Air Mansion',
+      // ✅ Use the new cache structure
+      const lastKnown = cache.lastObservedPosition || {
+        lat: 34.0882, 
+        lng: -118.4420,
+        locationName: 'Unknown (no data)',
         timestamp: new Date().toISOString()
       };
 
@@ -480,13 +493,17 @@ async function runCronJob() {
         }
       }
 
-      // --- Final fallback: nearest property ---
-      if (conclusion.destination === 'Unknown') {
-        const nearest = findNearestProperty(lastKnown.lat, lastKnown.lng);
+      // --- Final fallback ---
+      if (conclusion.destination === 'Unknown' || conclusion.destination.includes('(historical pattern)')) {
+        const nearest = findNearestProperty(lastKnown.lat, lastKnown.lng, MAX_PROPERTY_DISTANCE_MILES, 'grounded');
         if (nearest) {
           conclusion.destination = nearest.name;
           conclusion.confidence = Math.max(conclusion.confidence, 0.15);
-          conclusion.reasoning.push(`Final fallback: nearest property ${nearest.name}.`);
+          conclusion.reasoning.push(`Nearest property: ${nearest.name} (within ${MAX_PROPERTY_DISTANCE_MILES} miles).`);
+        } else {
+          conclusion.destination = 'Unknown';
+          conclusion.confidence = 0;
+          conclusion.reasoning.push('No nearby properties within reasonable distance.');
         }
       }
 
@@ -498,14 +515,8 @@ async function runCronJob() {
         (err) => { if (err) console.error('[DB] Insert conclusion error:', err); }
       );
 
-      cache.latestConclusion = conclusion;
-      if (conclusion.destination && conclusion.destination !== 'Unknown') {
-        cache.lastKnownLocation = {
-          ...cache.lastKnownLocation,
-          locationName: conclusion.destination,
-          timestamp: now
-        };
-      }
+      // ✅ Update inference (GUESS)
+      updateInference(conclusion);
 
       console.log(`[CRON] Ground inference: ${conclusion.destination} (${Math.round(conclusion.confidence * 100)}%)`);
     }
@@ -513,8 +524,6 @@ async function runCronJob() {
   } catch (err) {
     console.error('[CRON] ❌ Error:', err.message);
     console.error('[CRON] Stack:', err.stack);
-    
-    // Don't throw - keep the service running with cached data
     console.log('[CRON] ⚠️ Keeping cached data for next cycle');
   }
 }

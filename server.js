@@ -2,7 +2,7 @@ const express = require('express');
 const cron = require('node-cron');
 const path = require('path');
 const { runCronJob } = require('./cron');
-const cache = require('./memory-cache');
+const { getCurrentState, cache } = require('./memory-cache');
 const history = require('./history');
 const db = require('./db');
 
@@ -21,9 +21,43 @@ app.use(express.static(__dirname));
 
 app.get('/api/current', async (req, res) => {
   try {
-    if (cache.latestConclusion) {
-      return res.json(cache.latestConclusion);
+    // ✅ Use getCurrentState() from memory-cache
+    const state = getCurrentState();
+    
+    if (state.hasInference || state.hasObservation) {
+      // Combine observation + inference for UI
+      const response = {
+        // Inference data (what we think is happening)
+        state: state.latestConclusion?.state || 'unknown',
+        current_location: state.latestConclusion?.current_location || 'Unknown',
+        destination: state.latestConclusion?.destination || 'Unknown',
+        confidence: state.latestConclusion?.confidence || 0,
+        reasoning: state.latestConclusion?.reasoning || ['Waiting for data...'],
+        prediction_type: state.latestConclusion?.prediction_type || 'unknown',
+        timestamp: state.latestConclusion?.timestamp || new Date().toISOString(),
+        
+        // Observation data (what we actually know)
+        observed_lat: state.lastObservedPosition?.lat || null,
+        observed_lng: state.lastObservedPosition?.lng || null,
+        observed_on_ground: state.lastObservedPosition?.on_ground ?? null,
+        observed_age: state.flightAge || null,
+        
+        // Metadata
+        _meta: {
+          hasObservation: state.hasObservation,
+          hasInference: state.hasInference,
+          isStale: state.isStale || false,
+          flightAge: state.flightAge || null,
+          inferenceSource: state.inferenceSource || 'none',
+          inferenceConfidence: state.inferenceConfidence || 0,
+          lastUpdated: state.lastUpdated || null,
+          cacheVersion: '2.0'
+        }
+      };
+      return res.json(response);
     }
+    
+    // Fallback to DB if cache is empty
     const row = await history.getLatestConclusion();
     if (row) {
       res.json(row);
@@ -38,8 +72,9 @@ app.get('/api/current', async (req, res) => {
 
 app.get('/api/history', async (req, res) => {
   try {
-    const rows = await history.getHistory24Hours();
-    // ✅ OPTIMIZED: Limit to last 100 for frontend performance
+    // ✅ Get only inferences with reasonable confidence
+    const rows = await history.getHistoryWithConfidence(0.1);
+    // Limit to last 100 for frontend performance
     const limited = rows.slice(-100);
     res.json(limited);
   } catch (err) {
@@ -54,9 +89,11 @@ app.get('/api/snapshot', async (req, res) => {
     if (!timestamp) {
       return res.status(400).json({ error: 'Missing timestamp parameter' });
     }
-    const row = await history.getSnapshot(timestamp);
-    if (row) {
-      res.json(row);
+    
+    // ✅ Get combined state at timestamp
+    const state = await history.getStateAtTimestamp(timestamp);
+    if (state && (state.observation || state.inference)) {
+      res.json(state);
     } else {
       res.status(404).json({ error: 'No data for that timestamp' });
     }
@@ -68,6 +105,7 @@ app.get('/api/snapshot', async (req, res) => {
 
 app.get('/api/flight-path', async (req, res) => {
   try {
+    // ✅ Get raw flight data (observations only)
     const rows = await history.getFlightHistory24Hours();
     res.json(rows);
   } catch (err) {
@@ -76,11 +114,28 @@ app.get('/api/flight-path', async (req, res) => {
   }
 });
 
+app.get('/api/state', async (req, res) => {
+  try {
+    // ✅ Full state for debugging
+    const state = getCurrentState();
+    res.json(state);
+  } catch (err) {
+    console.error('[API] /api/state error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  const state = getCurrentState();
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
-    hasData: !!cache.latestConclusion
+    hasData: state.hasObservation || state.hasInference,
+    hasObservation: state.hasObservation,
+    hasInference: state.hasInference,
+    isStale: state.isStale || false,
+    flightAge: state.flightAge || null,
+    cacheVersion: state.cacheVersion || '2.0'
   });
 });
 
@@ -97,32 +152,14 @@ cron.schedule('*/60 * * * * *', async () => {
 });
 
 // =============================================
-// CLEANUP JOB (Every 12 hours - keeps 12 hours of data)
+// CLEANUP JOB (Every 12 hours)
 // =============================================
 
-// Run every 12 hours
 cron.schedule('0 */12 * * *', async () => {
   try {
-    // Keep only last 12 hours of data (720 rows at 1/minute)
-    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-    
-    db.run(
-      `DELETE FROM raw_flight_data WHERE timestamp < ?`,
-      [twelveHoursAgo],
-      (err) => {
-        if (!err) console.log('[CLEANUP] ✅ Old flight data removed (older than 12 hours)');
-        else console.error('[CLEANUP] ❌ Failed to clean flight data:', err);
-      }
-    );
-    
-    db.run(
-      `DELETE FROM ai_conclusions WHERE timestamp < ?`,
-      [twelveHoursAgo],
-      (err) => {
-        if (!err) console.log('[CLEANUP] ✅ Old conclusions removed (older than 12 hours)');
-        else console.error('[CLEANUP] ❌ Failed to clean conclusions:', err);
-      }
-    );
+    // ✅ Use history.cleanOldData() helper
+    await history.cleanOldData(12);
+    console.log('[CLEANUP] ✅ Old data cleaned (older than 12 hours)');
   } catch (err) {
     console.error('[CLEANUP] ❌ Cleanup error:', err.message);
   }
@@ -132,7 +169,7 @@ cron.schedule('0 */12 * * *', async () => {
 // START SERVER
 // =============================================
 
-app.listen(port,'0.0.0.0', () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`Listening on 0.0.0.0:${port} (PORT=${process.env.PORT})`);
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
@@ -147,11 +184,12 @@ app.listen(port,'0.0.0.0', () => {
   
   console.log('📌 Endpoints:');
   console.log(`   GET /              → Frontend UI`);
-  console.log(`   GET /api/current   → Latest conclusion`);
-  console.log(`   GET /api/history   → Last 24 hours (max 100 events)`);
-  console.log(`   GET /api/snapshot  → Specific timestamp`);
-  console.log(`   GET /api/flight-path → Raw flight data`);
-  console.log(`   GET /health        → Health check`);
+  console.log(`   GET /api/current   → Latest state (observation + inference)`);
+  console.log(`   GET /api/history   → Last 24 hours (inferences only, max 100)`);
+  console.log(`   GET /api/snapshot  → Combined state at specific timestamp`);
+  console.log(`   GET /api/flight-path → Raw flight data (observations only)`);
+  console.log(`   GET /api/state     → Full cache state (debug)`);
+  console.log(`   GET /health        → Health check with cache status`);
 });
 
 // Run once on startup
