@@ -7,89 +7,37 @@ const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
 const { askDeepSeek } = require('./deepseek-client');
 
-// --- OpenSky OAuth2 Token Management with Persistent Cache ---
-const TOKEN_CACHE_FILE = '/tmp/opensky_token_cache.json';
+// --- CONFIGURATION ---
+// Set BRIDGE_URL in Railway environment variables
+const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3001';
 
-let openSkyToken = null;
-let tokenExpiry = null;
-const CLIENT_ID = "tarel.tarik23@gmail.com-api-client";
-const CLIENT_SECRET = "yEluqjz2pROsOSHXqPYhX3rBg2edHR4U";
+// --- Railway Local Cache (fallback when bridge is down) ---
+const RAILWAY_CACHE_FILE = '/tmp/railway_cache.json';
+let railwayCache = null;
 
-// Load token from file cache on startup
-function loadTokenFromCache() {
+function loadRailwayCache() {
   try {
-    if (fs.existsSync(TOKEN_CACHE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(TOKEN_CACHE_FILE, 'utf8'));
-      if (data.token && data.expiry && Date.now() < data.expiry - 60000) {
-        openSkyToken = data.token;
-        tokenExpiry = data.expiry;
-        console.log(`[CRON] ✅ Loaded cached token (expires in ${Math.round((tokenExpiry - Date.now()) / 60000)} min)`);
-        return true;
-      }
+    if (fs.existsSync(RAILWAY_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(RAILWAY_CACHE_FILE, 'utf8'));
+      railwayCache = data;
+      console.log('[CRON] ✅ Loaded Railway cache from', railwayCache.timestamp);
+      return true;
     }
   } catch (e) {
-    // Ignore cache errors
+    console.log('[CRON] No Railway cache found');
   }
   return false;
 }
 
-// Save token to file cache
-function saveTokenToCache(token, expiry) {
+function saveRailwayCache(data) {
   try {
-    fs.writeFileSync(TOKEN_CACHE_FILE, JSON.stringify({
-      token: token,
-      expiry: expiry
+    fs.writeFileSync(RAILWAY_CACHE_FILE, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      data: data
     }));
+    console.log('[CRON] 💾 Saved Railway cache');
   } catch (e) {
-    // Ignore write errors
-  }
-}
-
-async function getOpenSkyToken() {
-  // Try to load from cache if not already loaded
-  if (!openSkyToken || !tokenExpiry) {
-    loadTokenFromCache();
-  }
-  
-  // If token is still valid (within 2 min of expiry), return it
-  if (openSkyToken && tokenExpiry && Date.now() < tokenExpiry - 120000) {
-    return openSkyToken;
-  }
-  
-  try {
-    console.log('[CRON] 🔑 Requesting new OpenSky OAuth2 token...');
-    const response = await fetch(
-      'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET
-        }),
-        timeout: 15000
-      }
-    );
-    
-    if (!response.ok) {
-      throw new Error(`Token request failed: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    openSkyToken = data.access_token;
-    tokenExpiry = Date.now() + (data.expires_in * 1000);
-    
-    // Save to file cache
-    saveTokenToCache(openSkyToken, tokenExpiry);
-    
-    console.log(`[CRON] ✅ OpenSky OAuth2 token obtained (expires in ${data.expires_in}s)`);
-    return openSkyToken;
-  } catch (err) {
-    console.error('[CRON] ❌ Failed to get OpenSky token:', err.message);
-    // If token fails, use anonymous access as fallback
-    console.warn('[CRON] ⚠️ Falling back to anonymous access.');
-    return null;
+    console.error('[CRON] Failed to save cache:', e.message);
   }
 }
 
@@ -98,7 +46,7 @@ let lastDeepSeekCallTime = 0;
 let lastDeepSeekResult = null;
 const DEEPSEEK_CACHE_TTL = 3600000; // 60 minutes
 
-// Helper: Normalize location names to avoid false mismatches
+// --- Helper Functions ---
 function normalizeLocation(name) {
   if (!name) return name;
   const map = {
@@ -119,27 +67,21 @@ function normalizeLocation(name) {
   return map[name] || name;
 }
 
-// Helper: Calculate heading from two positions
 function calculateHeadingFromPositions(lat1, lon1, lat2, lon2) {
   if (!lat1 || !lon1 || !lat2 || !lon2) return null;
-  
   const lat1Rad = lat1 * Math.PI / 180;
   const lon1Rad = lon1 * Math.PI / 180;
   const lat2Rad = lat2 * Math.PI / 180;
   const lon2Rad = lon2 * Math.PI / 180;
-  
   const dLon = lon2Rad - lon1Rad;
-  
   const y = Math.sin(dLon) * Math.cos(lat2Rad);
   const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - 
             Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
-  
   let heading = Math.atan2(y, x) * 180 / Math.PI;
   heading = (heading + 360) % 360;
   return heading;
 }
 
-// Helper: Find nearest property (includes ALL property types)
 function findNearestProperty(lat, lng) {
   const allProps = [
     ...staticData.corporate_hqs,
@@ -150,7 +92,6 @@ function findNearestProperty(lat, lng) {
   ];
   let nearest = null;
   let minDist = Infinity;
-  
   for (const prop of allProps) {
     if (!prop.lat || !prop.lng) continue;
     const d = haversine(lat, lng, prop.lat, prop.lng);
@@ -162,7 +103,6 @@ function findNearestProperty(lat, lng) {
   return nearest;
 }
 
-// Helper: Haversine distance
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 3958.8;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -171,97 +111,118 @@ function haversine(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+function predictDestinationByHeading(lat, lng, heading) {
+  if (!heading || heading === 0) return null;
+  const allProps = [
+    ...staticData.corporate_hqs,
+    ...staticData.residences,
+    ...(staticData.family_properties || []),
+    ...(staticData.friends_properties || []),
+    ...(staticData.frequent_destinations || [])
+  ];
+  let best = null;
+  let bestScore = 0;
+  for (const prop of allProps) {
+    if (!prop.lat || !prop.lng) continue;
+    const dx = prop.lng - lng;
+    const dy = prop.lat - lat;
+    const angle = Math.atan2(dx, dy) * 180 / Math.PI;
+    const diff = Math.abs((heading - angle + 360) % 360);
+    if (diff < 90) {
+      let score = 1 - (diff / 90);
+      if (prop.type === 'family') score += 0.05;
+      if (prop.type === 'friend') score += 0.03;
+      if (prop.type === 'event') score += 0.02;
+      if (score > bestScore) {
+        bestScore = score;
+        best = prop;
+      }
+    }
+  }
+  return best;
+}
+
+// --- MAIN CRON FUNCTION ---
 async function runCronJob() {
   console.log('[CRON] Fetching data at', new Date().toISOString());
 
   try {
-    // --- 1. Get OAuth2 Token (with persistent cache) ---
-    const token = await getOpenSkyToken();
-    const headers = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-      console.log('[CRON] ✅ Using OAuth2 authentication');
-    } else {
-      console.log('[CRON] ⚠️ Using anonymous access (fallback)');
-    }
+    // --- 1. Fetch from Bridge (with ngrok bypass header) ---
+    let adsbData = null;
+    let fromCache = false;
+    let dataSource = 'unknown';
     
-    // --- 2. Fetch flight data with timeout ---
-    let adsbRes;
     try {
-      adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { 
-        headers,
-        timeout: 15000
+      console.log('[CRON] 📡 Calling bridge...');
+      
+      const bridgeResponse = await fetch(`${BRIDGE_URL}/api/flights`, {
+        timeout: 20000,
+        headers: {
+          'ngrok-skip-browser-warning': 'true',  // Bypass ngrok warning page
+          'User-Agent': 'ElonTracker/1.0'         // Custom user agent
+        }
       });
-    } catch (fetchErr) {
-      if (fetchErr.message.includes('ETIMEDOUT') || fetchErr.message.includes('connect')) {
-        console.warn('[CRON] ⚠️ OpenSky API timed out. Using cached data.');
-        if (cache.currentFlight) {
-          console.log('[CRON] Using cached flight data from', cache.currentFlight.timestamp);
-        }
-        return;
-      }
-      throw fetchErr;
-    }
-    
-    // If rate limited, retry with exponential backoff
-    if (adsbRes.status === 429) {
-      console.warn('[CRON] ⚠️ Rate limited. Retrying with exponential backoff...');
-      let retryDelay = 5000;
-      let retryCount = 0;
-      const maxRetries = 3;
       
-      while (retryCount < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        retryCount++;
-        console.warn(`[CRON] Retry ${retryCount}/${maxRetries} after ${retryDelay}ms...`);
-        
-        // Refresh token before retry
-        const newToken = await getOpenSkyToken();
-        const retryHeaders = {};
-        if (newToken) {
-          retryHeaders['Authorization'] = `Bearer ${newToken}`;
+      if (bridgeResponse.ok) {
+        const bridgeResult = await bridgeResponse.json();
+        if (bridgeResult.success && bridgeResult.data) {
+          adsbData = bridgeResult.data;
+          dataSource = bridgeResult.source || 'live';
+          console.log(`[CRON] ✅ Data from bridge (${dataSource})`);
+          
+          // Save to Railway cache for fallback
+          saveRailwayCache(adsbData);
+        } else {
+          throw new Error('Bridge returned invalid data structure');
         }
-        
-        adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { headers: retryHeaders, timeout: 15000 });
-        
-        if (adsbRes.ok) {
-          console.warn('[CRON] ✅ Retry successful!');
-          break;
-        }
-        
-        if (adsbRes.status !== 429) {
-          throw new Error(`OpenSky API returned ${adsbRes.status}`);
-        }
-        
-        // Double the delay for next retry (exponential backoff)
-        retryDelay *= 2;
+      } else {
+        throw new Error(`Bridge responded with ${bridgeResponse.status}`);
       }
+    } catch (bridgeError) {
+      console.warn('[CRON] ⚠️ Bridge error:', bridgeError.message);
+      dataSource = 'cache_fallback';
       
-      if (!adsbRes.ok && adsbRes.status === 429) {
-        console.warn('[CRON] ⚠️ Still rate limited after retries. Skipping this cycle.');
-        return;
+      // Try Railway file cache
+      if (loadRailwayCache() && railwayCache && railwayCache.data) {
+        adsbData = railwayCache.data;
+        fromCache = true;
+        console.log('[CRON] ✅ Using Railway cache from', railwayCache.timestamp);
+      } 
+      // Fallback to memory cache
+      else if (cache.currentFlight) {
+        console.log('[CRON] ⚠️ Using memory cache (last known flight state)');
+        // Don't return - keep using the cached flight data
+        // The flightState will be null, and we'll use the cached flight data below
+      } 
+      else {
+        throw new Error('No data available from any source');
       }
     }
     
-    if (!adsbRes.ok) {
-      throw new Error(`OpenSky API returned ${adsbRes.status}`);
+    // --- 2. Process the data ---
+    // If we have adsbData from bridge or cache, use it to find flight
+    let flightState = null;
+    let isUsingCachedFlight = false;
+    
+    if (adsbData) {
+      const states = adsbData.states || [];
+      flightState = states.find(f => f[1] && f[1].trim() === 'N628TS');
+      console.log(`[CRON] Found ${states.length} states in data, N628TS: ${flightState ? '✅ found' : '❌ not found'}`);
     }
     
-    // Check rate limit headers
-    const remaining = adsbRes.headers.get('x-rate-limit-remaining');
-    if (remaining) {
-      console.log(`[CRON] 📊 Credits remaining: ${remaining}`);
+    // If no flight in current data but we have a cached flight in memory, use it
+    if (!flightState && cache.currentFlight) {
+      console.log('[CRON] ⚠️ No flight in current data, keeping previous flight state in memory');
+      isUsingCachedFlight = true;
+      // We'll use the cached flight data below
     }
     
-    const adsbData = await adsbRes.json();
-    const states = adsbData.states || [];
-    const flightState = states.find(f => f[1] && f[1].trim() === 'N628TS');
-
     const now = new Date().toISOString();
 
-    // --- 3. IF JET IS FLYING ---
-    if (flightState) {
-      const flight = {
+    // --- 3. IF JET IS FLYING (or we have cached flight data) ---
+    if (flightState || isUsingCachedFlight) {
+      // Use flightState if available, otherwise use cached flight
+      const flight = flightState ? {
         lat: flightState[6],
         lon: flightState[5],
         alt_baro: flightState[7],
@@ -270,22 +231,27 @@ async function runCronJob() {
         track: flightState[10],
         vert_rate: flightState[11],
         timestamp: flightState[4],
-        callsign: flightState[1],
-        icao24: flightState[0]
-      };
+        callsign: flightState[1] || 'N628TS',
+        icao24: flightState[0] || 'ac5e8d'
+      } : cache.currentFlight;
 
-      console.log(`[CRON] Jet found: ${flight.callsign} at ${flight.lat}, ${flight.lon}`);
+      if (flightState) {
+        console.log(`[CRON] Jet found: ${flight.callsign} at ${flight.lat}, ${flight.lon}`);
+      } else {
+        console.log(`[CRON] Using cached flight data from ${cache.currentFlight.timestamp}`);
+      }
 
-      // --- Insert raw flight data (sqlite3 callback) ---
-      db.run(
-        `INSERT INTO raw_flight_data (timestamp, lat, lng, altitude, speed, heading, on_ground, vert_rate, raw_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [now, flight.lat, flight.lon, flight.alt_baro, flight.gs, flight.track, flight.on_ground ? 1 : 0, flight.vert_rate, JSON.stringify(flight)],
-        (err) => { if (err) console.error('[DB] Insert flight error:', err); }
-      );
+      // Insert raw flight data (if live data, not cached)
+      if (flightState) {
+        db.run(
+          `INSERT INTO raw_flight_data (timestamp, lat, lng, altitude, speed, heading, on_ground, vert_rate, raw_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [now, flight.lat, flight.lon, flight.alt_baro, flight.gs, flight.track, flight.on_ground ? 1 : 0, flight.vert_rate, JSON.stringify(flight)],
+          (err) => { if (err) console.error('[DB] Insert flight error:', err); }
+        );
+      }
 
       const prev = cache.currentFlight;
-      let landingDetected = false;
       let trafficData = null;
 
       // Reset DeepSeek cache if jet took off
@@ -295,16 +261,17 @@ async function runCronJob() {
         console.log('[CRON] Jet took off - DeepSeek cache reset.');
       }
 
+      // Detect landing
       if (prev && prev.on_ground === 0 && flight.on_ground === 1) {
-        landingDetected = true;
         cache.landingDetected = true;
         cache.lastLandingTime = now;
         console.log('[CRON] LANDING DETECTED at', flight.lat, flight.lon);
 
         lastDeepSeekCallTime = 0;
         lastDeepSeekResult = null;
-        console.log('[CRON] Landing detected - DeepSeek cache reset for fresh ground analysis.');
+        console.log('[CRON] Landing detected - DeepSeek cache reset.');
 
+        // Get traffic data if available
         try {
           const wazeUrl = `https://www.waze.com/row-rtserver/web/TGeoRSS?tk=0&format=JSON&lon=${flight.lon}&lat=${flight.lat}&zoom=12`;
           const wazeRes = await fetch(wazeUrl);
@@ -314,7 +281,7 @@ async function runCronJob() {
         }
       }
 
-      // --- FALLBACK: If heading is missing, use previous or calculated ---
+      // --- Heading fallback ---
       let heading = flight.track;
       let headingSource = 'OpenSky';
       
@@ -335,12 +302,8 @@ async function runCronJob() {
           if (calculated !== null && calculated !== 0) {
             heading = calculated;
             headingSource = 'calculated';
-            console.log(`[CRON] Calculated heading from position: ${heading.toFixed(1)}°`);
-          } else {
-            console.log('[CRON] Could not calculate heading - positions too close or invalid.');
+            console.log(`[CRON] Calculated heading: ${heading.toFixed(1)}°`);
           }
-        } else {
-          console.log('[CRON] No previous position available for heading calculation.');
         }
       } else {
         console.log(`[CRON] OpenSky heading: ${heading}°`);
@@ -357,20 +320,18 @@ async function runCronJob() {
         vert_rate: flight.vert_rate || 0,
       }, trafficData);
 
-      // --- If destination is Unknown and we have a heading, try one more time ---
+      // --- If destination Unknown, try heading prediction ---
       if (conclusion.destination === 'Unknown' && heading && heading !== 0) {
         const prediction = predictDestinationByHeading(flight.lat, flight.lng, heading);
         if (prediction) {
           conclusion.destination = prediction.name;
           conclusion.confidence = Math.max(conclusion.confidence, 0.25);
-          conclusion.reasoning.push(`Heading ${heading.toFixed(1)}° (${headingSource}) points toward ${prediction.name}.`);
+          conclusion.reasoning.push(`Heading ${heading.toFixed(1)}° points toward ${prediction.name}.`);
           console.log(`[CRON] Heading ${heading.toFixed(1)}° → ${prediction.name}`);
-        } else {
-          console.log(`[CRON] Heading ${heading.toFixed(1)}° does not point to any known property.`);
         }
       }
 
-      // --- Nearest property fallback (when heading doesn't match) ---
+      // --- Nearest property fallback ---
       if (conclusion.destination === 'Unknown') {
         const nearest = findNearestProperty(flight.lat, flight.lng);
         if (nearest && haversine(flight.lat, flight.lng, nearest.lat, nearest.lng) < 200) {
@@ -378,13 +339,15 @@ async function runCronJob() {
           conclusion.destination = nearest.name;
           conclusion.confidence = Math.max(conclusion.confidence, 0.15);
           conclusion.reasoning.push(`Using nearest property: ${nearest.name} (${dist} miles).`);
-          console.log(`[CRON] Nearest property fallback: ${nearest.name} (${dist} miles)`);
-        } else {
-          console.log('[CRON] No nearby properties found within 200 miles.');
+          console.log(`[CRON] Nearest property: ${nearest.name} (${dist} miles)`);
         }
       }
 
-      // --- Save conclusion (sqlite3 callback) ---
+      // Add data source info to conclusion
+      conclusion.data_source = dataSource;
+      conclusion.from_cache = fromCache || isUsingCachedFlight;
+
+      // --- Save conclusion ---
       db.run(
         `INSERT INTO ai_conclusions (timestamp, state, current_location, destination, confidence, reasoning, prediction_type, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -392,12 +355,16 @@ async function runCronJob() {
         (err) => { if (err) console.error('[DB] Insert conclusion error:', err); }
       );
 
-      cache.previousFlight = cache.currentFlight;
-      cache.currentFlight = {
-        lat: flight.lat, lng: flight.lon, on_ground: flight.on_ground,
-        altitude: flight.alt_baro, speed: flight.gs, heading: flight.track,
-        vert_rate: flight.vert_rate, timestamp: now,
-      };
+      // Update cache (only if we have live data, not cached)
+      if (flightState) {
+        cache.previousFlight = cache.currentFlight;
+        cache.currentFlight = {
+          lat: flight.lat, lng: flight.lon, on_ground: flight.on_ground,
+          altitude: flight.alt_baro, speed: flight.gs, heading: flight.track,
+          vert_rate: flight.vert_rate, timestamp: now,
+        };
+      }
+      
       cache.lastKnownLocation = {
         lat: flight.lat, lng: flight.lon,
         locationName: conclusion.current_location || 'Unknown',
@@ -406,16 +373,12 @@ async function runCronJob() {
       cache.latestConclusion = conclusion;
 
       console.log(`[CRON] State: ${conclusion.state}, Destination: ${conclusion.destination || 'Unknown'}, Confidence: ${conclusion.confidence}`);
-
-      if (conclusion.confidence === 0) {
-        console.warn('[CRON] ⚠️ WARNING: Confidence is 0. Check heading data or property database.');
-        console.warn(`[CRON] Debug - heading: ${heading}, headingSource: ${headingSource}, destination: ${conclusion.destination}`);
-      }
+      console.log(`[CRON] Data source: ${dataSource}${fromCache ? ' (cached)' : ''}`);
     }
 
-    // --- 4. IF JET IS NOT FLYING (Ground Inference with CACHED DeepSeek) ---
+    // --- 4. IF JET IS NOT FLYING (Ground Inference) ---
     else {
-      console.log('[CRON] Jet not found - using cached DeepSeek AI.');
+      console.log('[CRON] Jet not found - using ground inference.');
 
       const lastKnown = cache.lastKnownLocation || {
         lat: 34.0882, lng: -118.4420,
@@ -425,7 +388,6 @@ async function runCronJob() {
 
       const nowMs = Date.now();
       
-      // --- Proper cache validation ---
       const hasValidCache = lastDeepSeekResult !== null && 
                             lastDeepSeekResult.destination !== 'Unknown' &&
                             (nowMs - lastDeepSeekCallTime) < DEEPSEEK_CACHE_TTL;
@@ -433,14 +395,16 @@ async function runCronJob() {
       let conclusion;
 
       if (hasValidCache) {
-        console.log('[CRON] Using cached DeepSeek result (avoiding API call).');
+        console.log('[CRON] Using cached DeepSeek result.');
         conclusion = {
           ...lastDeepSeekResult,
           timestamp: now,
-          prediction_type: 'grounded_inference_cached'
+          prediction_type: 'grounded_inference_cached',
+          data_source: dataSource,
+          from_cache: fromCache
         };
       } else {
-        console.log('[CRON] DeepSeek cache expired or no valid cache - calling API...');
+        console.log('[CRON] Calling DeepSeek API...');
 
         const prompt = `
           You are an expert analyst tracking Elon Musk.
@@ -478,13 +442,15 @@ async function runCronJob() {
               confidence: aiResult.confidence || 0.3,
               reasoning: Array.isArray(aiResult.reasoning) ? aiResult.reasoning : [aiResult.reasoning || 'AI analysis complete'],
               prediction_type: 'grounded_inference_deepseek',
-              timestamp: now
+              timestamp: now,
+              data_source: dataSource,
+              from_cache: fromCache
             };
             lastDeepSeekResult = conclusion;
             lastDeepSeekCallTime = nowMs;
             console.log('[DEEPSEEK] AI analysis completed and cached.');
           } catch (e) {
-            console.log('[DEEPSEEK] Parse error, using raw response:', deepSeekResponse);
+            console.log('[DEEPSEEK] Parse error, using raw response');
             conclusion = {
               state: 'grounded',
               current_location: lastKnown.locationName || 'Unknown',
@@ -492,7 +458,9 @@ async function runCronJob() {
               confidence: 0.3,
               reasoning: [deepSeekResponse],
               prediction_type: 'grounded_inference_deepseek_raw',
-              timestamp: now
+              timestamp: now,
+              data_source: dataSource,
+              from_cache: fromCache
             };
           }
         } else {
@@ -505,7 +473,9 @@ async function runCronJob() {
             confidence: fallback.confidence,
             reasoning: fallback.reasoning,
             prediction_type: 'grounded_inference_fallback',
-            timestamp: now
+            timestamp: now,
+            data_source: 'fallback',
+            from_cache: true
           };
         }
       }
@@ -520,7 +490,7 @@ async function runCronJob() {
         }
       }
 
-      // --- Save conclusion (sqlite3 callback) ---
+      // --- Save conclusion ---
       db.run(
         `INSERT INTO ai_conclusions (timestamp, state, current_location, destination, confidence, reasoning, prediction_type, raw_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -541,44 +511,12 @@ async function runCronJob() {
     }
 
   } catch (err) {
-    console.error('[CRON] Error:', err.message);
+    console.error('[CRON] ❌ Error:', err.message);
     console.error('[CRON] Stack:', err.stack);
+    
+    // Don't throw - keep the service running with cached data
+    console.log('[CRON] ⚠️ Keeping cached data for next cycle');
   }
 }
 
 module.exports = { runCronJob };
-
-// Helper: Predict destination by heading (ALL properties)
-function predictDestinationByHeading(lat, lng, heading) {
-  if (!heading || heading === 0) return null;
-  
-  const allProps = [
-    ...staticData.corporate_hqs,
-    ...staticData.residences,
-    ...(staticData.family_properties || []),
-    ...(staticData.friends_properties || []),
-    ...(staticData.frequent_destinations || [])
-  ];
-  
-  let best = null;
-  let bestScore = 0;
-  
-  for (const prop of allProps) {
-    if (!prop.lat || !prop.lng) continue;
-    const dx = prop.lng - lng;
-    const dy = prop.lat - lat;
-    const angle = Math.atan2(dx, dy) * 180 / Math.PI;
-    const diff = Math.abs((heading - angle + 360) % 360);
-    if (diff < 90) {
-      let score = 1 - (diff / 90);
-      if (prop.type === 'family') score += 0.05;
-      if (prop.type === 'friend') score += 0.03;
-      if (prop.type === 'event') score += 0.02;
-      if (score > bestScore) {
-        bestScore = score;
-        best = prop;
-      }
-    }
-  }
-  return best;
-}
