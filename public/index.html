@@ -342,137 +342,8 @@
       border: 2px solid #0a0a12;
     }
     
-    /* TIMELINE EVENTS - HORIZONTAL SCROLL FOR MOBILE */
-    .timeline-events {
-      display: flex;
-      flex-wrap: nowrap;
-      gap: 6px;
-      margin-top: 6px;
-      overflow-x: auto;
-      overflow-y: hidden;
-      flex: 1;
-      align-content: flex-start;
-      padding: 4px 2px 8px 2px;
-      max-height: none;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: thin;
-    }
-    
-    .timeline-events .event {
-      font-size: 9px;
-      background: rgba(255, 255, 255, 0.05);
-      padding: 4px 10px;
-      border-radius: 12px;
-      color: #888;
-      white-space: nowrap;
-      transition: all 0.2s ease;
-      border-left: 2px solid transparent;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      cursor: pointer;
-      flex-shrink: 0;
-      -webkit-tap-highlight-color: transparent;
-    }
-    
-    .timeline-events .event .time {
-      color: #555;
-      font-weight: 500;
-    }
-    
-    .timeline-events .event .dest {
-      color: #00d4ff;
-      font-weight: 500;
-    }
-    
-    .timeline-events .event .conf {
-      color: #444;
-      font-size: 8px;
-    }
-    
-    .timeline-events .event .state-icon {
-      font-size: 10px;
-    }
-    
-    /* Color coding by event type */
-    .timeline-events .event.landed {
-      border-left-color: #00ff88;
-      background: rgba(0, 255, 136, 0.06);
-    }
-    
-    .timeline-events .event.landed .dest {
-      color: #00ff88;
-    }
-    
-    .timeline-events .event.in_flight {
-      border-left-color: #ffaa00;
-      background: rgba(255, 170, 0, 0.06);
-    }
-    
-    .timeline-events .event.in_flight .dest {
-      color: #ffaa00;
-    }
-    
-    .timeline-events .event.grounded,
-    .timeline-events .event.parked {
-      border-left-color: #8888ff;
-      background: rgba(136, 136, 255, 0.06);
-    }
-    
-    .timeline-events .event.grounded .dest,
-    .timeline-events .event.parked .dest {
-      color: #8888ff;
-    }
-    
-    .timeline-events .event.unknown {
-      border-left-color: #666;
-    }
-    
-    .timeline-events .event:hover {
-      background: rgba(255, 255, 255, 0.08);
-      transform: translateY(-1px);
-    }
-    
-    /* Active event highlighting */
-    .timeline-events .event.active {
-      background: rgba(0, 212, 255, 0.2);
-      border-left-color: #00d4ff;
-      box-shadow: 0 0 20px rgba(0, 212, 255, 0.15);
-      transform: scale(1.02);
-    }
-    
-    .timeline-events .event.active .dest {
-      color: #00d4ff;
-      font-weight: 700;
-    }
-    
-    .timeline-events .event.count-info {
-      background: rgba(255, 255, 255, 0.03);
-      border-left-color: #555;
-      color: #666;
-      font-size: 8px;
-    }
-    
-    /* Scrollbar styling */
-    .timeline-events::-webkit-scrollbar {
-      height: 3px;
-    }
-    
-    .timeline-events::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    
-    .timeline-events::-webkit-scrollbar-thumb {
-      background: rgba(0, 212, 255, 0.3);
-      border-radius: 2px;
-    }
-    
-    .timeline-events::-webkit-scrollbar-thumb:hover {
-      background: rgba(0, 212, 255, 0.5);
-    }
-    
     /* ============================================= */
-    /* CARDS TRACK - NEW for double sync */
+    /* CARDS TRACK - Single horizontal scroll row */
     /* ============================================= */
     .cards-track {
       display: flex;
@@ -487,6 +358,15 @@
       scrollbar-width: thin;
       min-height: 80px;
       max-height: 120px;
+      
+      /* ✅ FIX: Better touch/scroll behavior */
+      touch-action: pan-x;
+      cursor: grab;
+      user-select: none;
+    }
+    
+    .cards-track:active {
+      cursor: grabbing;
     }
     
     .cards-track .card-item {
@@ -502,6 +382,10 @@
       display: flex;
       flex-direction: column;
       justify-content: center;
+      
+      /* ✅ FIX: Prevent text selection during drag */
+      user-select: none;
+      -webkit-user-select: none;
     }
     
     .cards-track .card-item.active {
@@ -639,24 +523,6 @@
         height: 14px;
       }
       
-      .timeline-events .event {
-        font-size: 8px;
-        padding: 3px 8px;
-        border-radius: 10px;
-      }
-      
-      .timeline-events .event .time {
-        font-size: 8px;
-      }
-      
-      .timeline-events .event .dest {
-        font-size: 8px;
-      }
-      
-      .timeline-events .event .conf {
-        font-size: 7px;
-      }
-      
       .cards-track .card-item {
         min-width: 140px;
         max-width: 180px;
@@ -703,23 +569,6 @@
       .sidebar .timeline-container {
         padding: 8px 10px;
         min-height: 80px;
-      }
-      
-      .timeline-events .event {
-        font-size: 7px;
-        padding: 2px 6px;
-      }
-      
-      .timeline-events .event .time {
-        font-size: 7px;
-      }
-      
-      .timeline-events .event .dest {
-        font-size: 7px;
-      }
-      
-      .timeline-events .event .conf {
-        font-size: 6px;
       }
       
       .cards-track .card-item {
@@ -802,12 +651,7 @@
           </div>
           <input type="range" id="time-slider" min="0" max="100" value="100" />
           
-          <!-- Timeline Events (chips) -->
-          <div class="timeline-events" id="timeline-events">
-            <span class="event">No events yet</span>
-          </div>
-          
-          <!-- ✅ NEW: Cards Track (syncs with timeline) -->
+          <!-- ✅ Cards Track - Single horizontal row -->
           <div class="cards-track" id="cards-track">
             <div class="card-item">No cards yet</div>
           </div>
