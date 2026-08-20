@@ -103,12 +103,59 @@ function getCurrentState() {
  * Clear inference (when we want to reset guesses)
  */
 function clearInference() {
+  // IMPORTANT: do NOT clear lastObservedPosition / currentFlight
+  // AI no_signal path needs the last ADS-B point
   cache.latestConclusion = null;
   cache.lastInference = null;
   cache.inferenceSource = null;
   cache.inferenceConfidence = 0;
   cache.landingDetected = false;
   cache.lastLandingTime = null;
+}
+
+/**
+ * Keep last ADS-B in RAM for AI approx (default 1 hour window for "fresh enough").
+ * Position itself is not deleted by cleanup — only marked too old for AI if desired.
+ */
+const LAST_OBS_AI_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+function isLastObservationFreshEnoughForAi(maxAgeMs = LAST_OBS_AI_MAX_AGE_MS) {
+  const p = cache.lastObservedPosition;
+  if (!p || !p.timestamp) return false;
+  const age = Date.now() - new Date(p.timestamp).getTime();
+  return Number.isFinite(age) && age >= 0 && age <= maxAgeMs;
+}
+
+/**
+ * After process restart, RAM is empty — reload newest raw_flight_data row if recent.
+ */
+async function hydrateLastObservationFromDb(historyModule, maxAgeMs = LAST_OBS_AI_MAX_AGE_MS) {
+  if (cache.lastObservedPosition) return cache.lastObservedPosition;
+  try {
+    const row = await historyModule.getLatestFlight();
+    if (!row || row.lat == null || row.lng == null) return null;
+    const age = Date.now() - new Date(row.timestamp).getTime();
+    if (!Number.isFinite(age) || age > maxAgeMs) {
+      console.log('[CACHE] DB last flight too old for hydrate', row.timestamp);
+      return null;
+    }
+    updateObservation({
+      lat: row.lat,
+      lon: row.lng,
+      lng: row.lng,
+      on_ground: row.on_ground,
+      heading: row.heading,
+      altitude: row.altitude,
+      speed: row.speed,
+      timestamp: row.timestamp,
+      source: 'db_hydrate',
+    });
+    console.log('[CACHE] Hydrated lastObservedPosition from DB', row.lat, row.lng);
+    return cache.lastObservedPosition;
+  } catch (e) {
+    console.warn('[CACHE] Hydrate failed:', e.message);
+    return null;
+  }
 }
 
 /**
@@ -128,5 +175,8 @@ module.exports = {
   updateInference,
   getCurrentState,
   clearInference,
-  invalidateObservation
+  invalidateObservation,
+  hydrateLastObservationFromDb,
+  isLastObservationFreshEnoughForAi,
+  LAST_OBS_AI_MAX_AGE_MS,
 };

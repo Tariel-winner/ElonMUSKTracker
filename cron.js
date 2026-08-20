@@ -1,11 +1,12 @@
 const fetch = require('node-fetch');
 const fs = require('fs');
 const db = require('./db');
-const { cache, updateObservation, updateInference, clearInference, getCurrentState } = require('./memory-cache');
+const { cache, updateObservation, updateInference, clearInference, getCurrentState, hydrateLastObservationFromDb, isLastObservationFreshEnoughForAi } = require('./memory-cache');
 const { generateConclusion } = require('./ai-correlator');
 const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
 const { askDeepSeek } = require('./deepseek-client');
+const history = require('./history');
 
 // --- CONFIGURATION ---
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3001';
@@ -203,6 +204,9 @@ async function runCronJob() {
   console.log('[CRON] Fetching data at', new Date().toISOString());
 
   try {
+    // After restart: restore last ADS-B from DB if < 1h old (keeps AI approx possible)
+    await hydrateLastObservationFromDb(history);
+
     // --- 1. Fetch from Bridge ---
     let adsbData = null;
     let fromCache = false;
@@ -530,7 +534,7 @@ async function runCronJob() {
           from_cache: true,
           ai_calls_today: aiCallsToday,
         };
-      } else if (lastKnown && canCallAi()) {
+      } else if (lastKnown && isLastObservationFreshEnoughForAi() && canCallAi()) {
         const candidates = staticData
           .getPlacesFor('grounded')
           .slice(0, 25)
@@ -602,6 +606,9 @@ Return ONLY JSON.
         } else {
           console.log('[DEEPSEEK] Parse failed — keeping rules/Unknown.');
         }
+      } else if (lastKnown && !isLastObservationFreshEnoughForAi()) {
+        conclusion.reasoning.push('Last ADS-B older than 1h — skipping AI approx (pin still shown if present).');
+        console.log('[DEEPSEEK] Skip — last observation older than 1h.');
       } else if (!canCallAi()) {
         conclusion.reasoning.push(`AI daily budget exhausted (${AI_MAX_CALLS_PER_DAY}/day).`);
         console.log('[DEEPSEEK] Daily budget hit — skip call.');

@@ -161,9 +161,9 @@ cron.schedule('*/60 * * * * *', async () => {
 
 cron.schedule('0 */12 * * *', async () => {
   try {
-    // ✅ Use history.cleanOldData() helper
-    await history.cleanOldData(12);
-    console.log('[CLEANUP] ✅ Old data cleaned (older than 12 hours)');
+    // DB only — does NOT clear RAM lastObservedPosition (needed for AI approx)
+    await history.cleanOldData(24);
+    console.log('[CLEANUP] ✅ Old DB rows cleaned (older than 24 hours); RAM last point kept');
   } catch (err) {
     console.error('[CLEANUP] ❌ Cleanup error:', err.message);
   }
