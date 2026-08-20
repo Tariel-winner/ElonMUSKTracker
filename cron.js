@@ -7,6 +7,7 @@ const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
 const { askDeepSeek } = require('./deepseek-client');
 const history = require('./history');
+const { reverseGeocode, reverseGeocodeCached } = require('./reverse-geocode');
 
 // --- CONFIGURATION ---
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3001';
@@ -171,8 +172,9 @@ function nearestAirportLabel(lat, lng, maxMi = 80) {
 /**
  * Human explanation of where the aircraft is and which way it is going
  * (even when destination place is Unknown).
+ * placeName: optional reverse-geocoded city/town (e.g. "Memphis, Tennessee").
  */
-function describeAirborneSituation(flight, heading) {
+function describeAirborneSituation(flight, heading, placeName) {
   const lat = flight.lat;
   const lon = flight.lon ?? flight.lng;
   const speed = flight.gs ?? flight.speed ?? 0;
@@ -180,12 +182,13 @@ function describeAirborneSituation(flight, heading) {
   const region = roughRegion(lat, lon);
   const nearApt = nearestAirportLabel(lat, lon);
   const card = headingToCardinal(heading);
+  const where = placeName || `the ${region}`;
   const parts = [];
 
   parts.push(
-    `Aircraft is airborne over the ${region}` +
-      (nearApt ? `, near ${nearApt}` : '') +
-      ` at ${Number(lat).toFixed(3)}°, ${Number(lon).toFixed(3)}°.`
+    `Aircraft is airborne near ${where}` +
+      (nearApt ? ` (${nearApt})` : '') +
+      ` · ${Number(lat).toFixed(3)}°, ${Number(lon).toFixed(3)}°.`
   );
 
   if (isValidHeading(heading)) {
@@ -199,7 +202,6 @@ function describeAirborneSituation(flight, heading) {
     parts.push('Heading not available from ADS-B.');
   }
 
-  // Closest place in the direction of travel (info only — may still be Unknown dest)
   if (isValidHeading(heading)) {
     let best = null;
     let bestScore = Infinity;
@@ -210,7 +212,6 @@ function describeAirborneSituation(flight, heading) {
       const brg = calculateBearing(lat, lon, p.lat, p.lng);
       if (brg == null) continue;
       const diff = angleDiff(heading, brg);
-      // Prefer somewhat ahead; report even if outside tight cone
       if (diff < 90 && dist < bestScore) {
         bestScore = dist;
         best = { p, dist, diff };
@@ -519,8 +520,14 @@ async function runCronJob() {
       conclusion.phase = flight.on_ground ? 'landed' : 'in_flight';
 
       if (!flight.on_ground) {
-        const explain = describeAirborneSituation(flight, heading);
-        // Replace vague correlator line with concrete where / heading
+        // City/town name when possible (cached Nominatim); else coarse region
+        let placeName = reverseGeocodeCached(flight.lat, flight.lon);
+        if (!placeName) {
+          placeName = await reverseGeocode(flight.lat, flight.lon);
+        }
+        const whereLabel = placeName || roughRegion(flight.lat, flight.lon);
+
+        const explain = describeAirborneSituation(flight, heading, placeName);
         conclusion.reasoning = [
           ...explain,
           ...(conclusion.destination !== 'Unknown'
@@ -528,12 +535,21 @@ async function runCronJob() {
             : ['Destination place: Unknown (no strong match in places list).']),
         ];
         conclusion.current_location =
-          `Airborne · ${roughRegion(flight.lat, flight.lon)} · ${headingToCardinal(heading)} (${isValidHeading(heading) ? heading.toFixed(0) + '°' : 'n/a'})`;
+          `Near ${whereLabel} · ${headingToCardinal(heading)} (${isValidHeading(heading) ? heading.toFixed(0) + '°' : 'n/a'})`;
+        conclusion.geo_label = whereLabel;
         conclusion.status_message =
           conclusion.destination !== 'Unknown'
-            ? `In flight — ${headingToCardinal(heading)}; place hypothesis: ${conclusion.destination}.`
-            : `In flight over ${roughRegion(flight.lat, flight.lon)}, heading ${headingToCardinal(heading)} — no matching place in list.`;
+            ? `In flight near ${whereLabel} — ${headingToCardinal(heading)}; place hypothesis: ${conclusion.destination}.`
+            : `In flight near ${whereLabel}, heading ${headingToCardinal(heading)} — no matching place in list.`;
       } else {
+        let placeName = reverseGeocodeCached(flight.lat, flight.lon);
+        if (!placeName) {
+          placeName = await reverseGeocode(flight.lat, flight.lon);
+        }
+        if (placeName) {
+          conclusion.geo_label = placeName;
+          conclusion.current_location = `On ground near ${placeName}`;
+        }
         conclusion.status_message = conclusion.destination !== 'Unknown'
           ? 'Aircraft on ground — nearby place is a hypothesis only.'
           : 'Aircraft on ground — no strong place match.';

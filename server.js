@@ -33,6 +33,7 @@ app.get('/api/current', async (req, res) => {
         status_message: state.latestConclusion?.status_message || null,
         hypothesis_type: state.latestConclusion?.hypothesis_type || null,
         current_location: state.latestConclusion?.current_location || 'Unknown',
+        geo_label: state.latestConclusion?.geo_label || null,
         destination: state.latestConclusion?.destination || 'Unknown',
         confidence: state.latestConclusion?.confidence || 0,
         reasoning: state.latestConclusion?.reasoning || ['Waiting for data...'],
