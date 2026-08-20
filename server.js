@@ -1,180 +1,159 @@
 const express = require('express');
-const fetch = require('node-fetch');
-const fs = require('fs');
-const path = require('path');
 const cron = require('node-cron');
+const path = require('path');
+const { runCronJob } = require('./cron');
+const cache = require('./memory-cache');
+const history = require('./history');
+const db = require('./db');
 
 const app = express();
-const PORT = 3001;
+const port = process.env.PORT || 3000;
 
-// Cache file
-const CACHE_FILE = path.join(__dirname, 'flight_cache.json');
-let flightCache = {
-  lastUpdated: null,
-  data: null
-};
+// =============================================
+// SERVE STATIC FILES
+// =============================================
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
 
-// Load cache from disk
-function loadCache() {
+// =============================================
+// API ENDPOINTS
+// =============================================
+
+app.get('/api/current', async (req, res) => {
   try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-      flightCache = data;
-      console.log(`[BRIDGE] ✅ Loaded cache from ${flightCache.lastUpdated}`);
+    if (cache.latestConclusion) {
+      return res.json(cache.latestConclusion);
     }
-  } catch (e) {
-    console.log('[BRIDGE] No cache found');
-  }
-}
-
-// Save cache to disk
-function saveCache() {
-  try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(flightCache, null, 2));
-  } catch (e) {
-    console.error('[BRIDGE] Failed to save cache');
-  }
-}
-
-// OpenSky credentials
-const CLIENT_ID = "tarel.tarik23@gmail.com-api-client";
-const CLIENT_SECRET = "yEluqjz2pROsOSHXqPYhX3rBg2edHR4U";
-let openSkyToken = null;
-let tokenExpiry = null;
-
-// Get OAuth2 token
-async function getOpenSkyToken() {
-  if (openSkyToken && tokenExpiry && Date.now() < tokenExpiry - 120000) {
-    return openSkyToken;
-  }
-  
-  try {
-    console.log('[BRIDGE] 🔑 Getting token...');
-    const response = await fetch(
-      'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET
-        }),
-        timeout: 15000
-      }
-    );
-    
-    if (!response.ok) throw new Error(`Token failed: ${response.status}`);
-    
-    const data = await response.json();
-    openSkyToken = data.access_token;
-    tokenExpiry = Date.now() + (data.expires_in * 1000);
-    console.log('[BRIDGE] ✅ Token obtained');
-    return openSkyToken;
-  } catch (err) {
-    console.error('[BRIDGE] ❌ Token error:', err.message);
-    return null;
-  }
-}
-
-// Fetch from OpenSky
-async function fetchFlightData() {
-  try {
-    const token = await getOpenSkyToken();
-    const headers = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    
-    console.log('[BRIDGE] 📡 Fetching flights...');
-    const response = await fetch('https://opensky-network.org/api/states/all?time=0', {
-      headers,
-      timeout: 15000
-    });
-    
-    if (!response.ok) {
-      throw new Error(`OpenSky returned ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    flightCache = {
-      lastUpdated: new Date().toISOString(),
-      data: data
-    };
-    saveCache();
-    
-    console.log(`[BRIDGE] ✅ Fetched ${(data.states || []).length} flights`);
-    return data;
-    
-  } catch (error) {
-    console.error('[BRIDGE] ❌ Error:', error.message);
-    if (flightCache.data) {
-      console.log('[BRIDGE] ⚠️ Returning cached data');
-      return flightCache.data;
-    }
-    throw error;
-  }
-}
-
-// API endpoint for Railway
-app.get('/api/flights', async (req, res) => {
-  try {
-    const data = await fetchFlightData();
-    res.json({
-      success: true,
-      source: 'live',
-      timestamp: new Date().toISOString(),
-      data: data
-    });
-  } catch (error) {
-    if (flightCache.data) {
-      res.json({
-        success: true,
-        source: 'cache',
-        timestamp: new Date().toISOString(),
-        data: flightCache.data
-      });
+    const row = await history.getLatestConclusion();
+    if (row) {
+      res.json(row);
     } else {
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      res.status(404).json({ error: 'No data yet' });
     }
+  } catch (err) {
+    console.error('[API] /api/current error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Health check
+app.get('/api/history', async (req, res) => {
+  try {
+    const rows = await history.getHistory24Hours();
+    // ✅ OPTIMIZED: Limit to last 100 for frontend performance
+    const limited = rows.slice(-100);
+    res.json(limited);
+  } catch (err) {
+    console.error('[API] /api/history error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/snapshot', async (req, res) => {
+  try {
+    const { timestamp } = req.query;
+    if (!timestamp) {
+      return res.status(400).json({ error: 'Missing timestamp parameter' });
+    }
+    const row = await history.getSnapshot(timestamp);
+    if (row) {
+      res.json(row);
+    } else {
+      res.status(404).json({ error: 'No data for that timestamp' });
+    }
+  } catch (err) {
+    console.error('[API] /api/snapshot error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/flight-path', async (req, res) => {
+  try {
+    const rows = await history.getFlightHistory24Hours();
+    res.json(rows);
+  } catch (err) {
+    console.error('[API] /api/flight-path error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
+  res.json({ 
+    status: 'ok', 
     timestamp: new Date().toISOString(),
-    hasCache: !!flightCache.data,
-    cacheAge: flightCache.lastUpdated
+    hasData: !!cache.latestConclusion
   });
 });
 
-// Start server
-loadCache();
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`
-╔════════════════════════════════════════════╗
-║  🌉 OPENSKY BRIDGE SERVER                  ║
-╠════════════════════════════════════════════╣
-║  🚀 Port: ${PORT}                          ║
-║  📊 Cache: ${flightCache.data ? '✅ Loaded' : '❌ Empty'} ║
-║  📍 Endpoint: http://localhost:${PORT}/api/flights ║
-╚════════════════════════════════════════════╝
-  `);
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Auto-refresh every 30 seconds
+// =============================================
+// CRON JOB (Every 60 seconds)
+// =============================================
+
 cron.schedule('*/60 * * * * *', async () => {
+  await runCronJob();
+});
+
+// =============================================
+// CLEANUP JOB (Every 12 hours - keeps 12 hours of data)
+// =============================================
+
+// Run every 12 hours
+cron.schedule('0 */12 * * *', async () => {
   try {
-    await fetchFlightData();
-  } catch (e) {
-    // Silent fail
+    // Keep only last 12 hours of data (720 rows at 1/minute)
+    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+    
+    db.run(
+      `DELETE FROM raw_flight_data WHERE timestamp < ?`,
+      [twelveHoursAgo],
+      (err) => {
+        if (!err) console.log('[CLEANUP] ✅ Old flight data removed (older than 12 hours)');
+        else console.error('[CLEANUP] ❌ Failed to clean flight data:', err);
+      }
+    );
+    
+    db.run(
+      `DELETE FROM ai_conclusions WHERE timestamp < ?`,
+      [twelveHoursAgo],
+      (err) => {
+        if (!err) console.log('[CLEANUP] ✅ Old conclusions removed (older than 12 hours)');
+        else console.error('[CLEANUP] ❌ Failed to clean conclusions:', err);
+      }
+    );
+  } catch (err) {
+    console.error('[CLEANUP] ❌ Cleanup error:', err.message);
   }
 });
 
-module.exports = app;
+// =============================================
+// START SERVER
+// =============================================
+
+app.listen(port, () => {
+  console.log(`
+╔══════════════════════════════════════════════════════════╗
+║  🛩️  ELON MUSK TRACKER - BACKEND SERVER                 ║
+╠══════════════════════════════════════════════════════════╣
+║  🚀 HTTP Server:    http://localhost:${port}             ║
+║  ⏰ Cron Job:       Every 60 seconds                   ║
+║  🧹 Cleanup Job:    Every 12 hours                    ║
+║  📊 Database:       SQLite (data.db)                   ║
+╚══════════════════════════════════════════════════════════╝
+  `);
+  
+  console.log('📌 Endpoints:');
+  console.log(`   GET /              → Frontend UI`);
+  console.log(`   GET /api/current   → Latest conclusion`);
+  console.log(`   GET /api/history   → Last 24 hours (max 100 events)`);
+  console.log(`   GET /api/snapshot  → Specific timestamp`);
+  console.log(`   GET /api/flight-path → Raw flight data`);
+  console.log(`   GET /health        → Health check`);
+});
+
+// Run once on startup
+setTimeout(async () => {
+  await runCronJob();
+}, 1000);
