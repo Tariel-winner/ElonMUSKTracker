@@ -149,10 +149,11 @@ app.get('/', (req, res) => {
 });
 
 // =============================================
-// CRON JOB (Every 60 seconds)
+// CRON JOB — align with OpenSky bridge (5 min)
+// Bridge caches OpenSky; calling more often only re-reads cache.
 // =============================================
 
-cron.schedule('*/60 * * * * *', async () => {
+cron.schedule('*/5 * * * *', async () => {
   await runCronJob();
 });
 
@@ -178,10 +179,10 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`Listening on 0.0.0.0:${port} (PORT=${process.env.PORT})`);
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║  🛩️  ELON MUSK TRACKER - BACKEND SERVER                 ║
+║  🛩️  FLIGHT STUDY TRACKER - BACKEND                    ║
 ╠══════════════════════════════════════════════════════════╣
 ║  🚀 HTTP Server:    http://localhost:${port}             ║
-║  ⏰ Cron Job:       Every 60 seconds                   ║
+║  ⏰ Cron → bridge:  Every 5 minutes (matches OpenSky)  ║
 ║  🧹 Cleanup Job:    Every 12 hours                    ║
 ║  📊 Database:       SQLite (data.db)                   ║
 ╚══════════════════════════════════════════════════════════╝

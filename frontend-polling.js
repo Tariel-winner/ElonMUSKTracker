@@ -279,12 +279,14 @@ class ElonTracker {
   // =============================================
   // 4. POLLING
   // =============================================
+  // Poll local /api/current — OpenSky only updates ~every 5 min via bridge
   startPolling() {
+    const POLL_MS = 60 * 1000; // 1 min UI refresh (does NOT hit OpenSky)
     this.pollingInterval = setInterval(() => {
       if (this.isLiveMode && !this.isUserInteracting) {
         this.refreshLive();
       }
-    }, 10000);
+    }, POLL_MS);
   }
 
   // =============================================
