@@ -15,9 +15,6 @@ let tokenExpiry = null;
 const CLIENT_ID = "tarel.tarik23@gmail.com-api-client";
 const CLIENT_SECRET = "yEluqjz2pROsOSHXqPYhX3rBg2edHR4U";
 
-// Check if running on Railway
-const isRailway = !!process.env.RAILWAY_SERVICE_ID;
-
 // Load token from file cache on startup
 function loadTokenFromCache() {
   try {
@@ -49,12 +46,6 @@ function saveTokenToCache(token, expiry) {
 }
 
 async function getOpenSkyToken() {
-  // On Railway, skip OAuth2 entirely (avoid ETIMEDOUT)
-  if (isRailway) {
-    console.log('[CRON] 🚀 Running on Railway: Skipping OAuth2, using anonymous access.');
-    return null;
-  }
-  
   // Try to load from cache if not already loaded
   if (!openSkyToken || !tokenExpiry) {
     loadTokenFromCache();
@@ -77,7 +68,7 @@ async function getOpenSkyToken() {
           client_id: CLIENT_ID,
           client_secret: CLIENT_SECRET
         }),
-        timeout: 10000
+        timeout: 15000
       }
     );
     
@@ -96,7 +87,8 @@ async function getOpenSkyToken() {
     return openSkyToken;
   } catch (err) {
     console.error('[CRON] ❌ Failed to get OpenSky token:', err.message);
-    // If token fails, use anonymous access
+    // If token fails, use anonymous access as fallback
+    console.warn('[CRON] ⚠️ Falling back to anonymous access.');
     return null;
   }
 }
@@ -183,14 +175,14 @@ async function runCronJob() {
   console.log('[CRON] Fetching data at', new Date().toISOString());
 
   try {
-    // --- 1. Get OAuth2 Token (cached, skips on Railway) ---
+    // --- 1. Get OAuth2 Token (with persistent cache) ---
     const token = await getOpenSkyToken();
     const headers = {};
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
-      console.log('[CRON] Using OAuth2 authentication');
+      console.log('[CRON] ✅ Using OAuth2 authentication');
     } else {
-      console.log('[CRON] Using anonymous access');
+      console.log('[CRON] ⚠️ Using anonymous access (fallback)');
     }
     
     // --- 2. Fetch flight data with timeout ---
@@ -223,7 +215,7 @@ async function runCronJob() {
         retryCount++;
         console.warn(`[CRON] Retry ${retryCount}/${maxRetries} after ${retryDelay}ms...`);
         
-        // Refresh token before retry (or skip on Railway)
+        // Refresh token before retry
         const newToken = await getOpenSkyToken();
         const retryHeaders = {};
         if (newToken) {
