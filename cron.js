@@ -7,15 +7,61 @@ const { inferLocationWhenGrounded } = require('./location-inference');
 const staticData = require('./static-data');
 const { askDeepSeek } = require('./deepseek-client');
 
-// --- OpenSky OAuth2 Token Management ---
+// --- OpenSky OAuth2 Token Management with Persistent Cache ---
+const TOKEN_CACHE_FILE = '/tmp/opensky_token_cache.json';
+
 let openSkyToken = null;
 let tokenExpiry = null;
 const CLIENT_ID = "tarel.tarik23@gmail.com-api-client";
 const CLIENT_SECRET = "yEluqjz2pROsOSHXqPYhX3rBg2edHR4U";
 
+// Check if running on Railway
+const isRailway = !!process.env.RAILWAY_SERVICE_ID;
+
+// Load token from file cache on startup
+function loadTokenFromCache() {
+  try {
+    if (fs.existsSync(TOKEN_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TOKEN_CACHE_FILE, 'utf8'));
+      if (data.token && data.expiry && Date.now() < data.expiry - 60000) {
+        openSkyToken = data.token;
+        tokenExpiry = data.expiry;
+        console.log(`[CRON] ✅ Loaded cached token (expires in ${Math.round((tokenExpiry - Date.now()) / 60000)} min)`);
+        return true;
+      }
+    }
+  } catch (e) {
+    // Ignore cache errors
+  }
+  return false;
+}
+
+// Save token to file cache
+function saveTokenToCache(token, expiry) {
+  try {
+    fs.writeFileSync(TOKEN_CACHE_FILE, JSON.stringify({
+      token: token,
+      expiry: expiry
+    }));
+  } catch (e) {
+    // Ignore write errors
+  }
+}
+
 async function getOpenSkyToken() {
-  // If token is still valid (within 5 min of expiry), return it
-  if (openSkyToken && tokenExpiry && Date.now() < tokenExpiry - 300000) {
+  // On Railway, skip OAuth2 entirely (avoid ETIMEDOUT)
+  if (isRailway) {
+    console.log('[CRON] 🚀 Running on Railway: Skipping OAuth2, using anonymous access.');
+    return null;
+  }
+  
+  // Try to load from cache if not already loaded
+  if (!openSkyToken || !tokenExpiry) {
+    loadTokenFromCache();
+  }
+  
+  // If token is still valid (within 2 min of expiry), return it
+  if (openSkyToken && tokenExpiry && Date.now() < tokenExpiry - 120000) {
     return openSkyToken;
   }
   
@@ -30,21 +76,27 @@ async function getOpenSkyToken() {
           grant_type: 'client_credentials',
           client_id: CLIENT_ID,
           client_secret: CLIENT_SECRET
-        })
+        }),
+        timeout: 10000
       }
     );
     
     if (!response.ok) {
-      throw new Error(`Token request failed: ${response.status} ${response.statusText}`);
+      throw new Error(`Token request failed: ${response.status}`);
     }
     
     const data = await response.json();
     openSkyToken = data.access_token;
     tokenExpiry = Date.now() + (data.expires_in * 1000);
+    
+    // Save to file cache
+    saveTokenToCache(openSkyToken, tokenExpiry);
+    
     console.log(`[CRON] ✅ OpenSky OAuth2 token obtained (expires in ${data.expires_in}s)`);
     return openSkyToken;
   } catch (err) {
     console.error('[CRON] ❌ Failed to get OpenSky token:', err.message);
+    // If token fails, use anonymous access
     return null;
   }
 }
@@ -131,17 +183,33 @@ async function runCronJob() {
   console.log('[CRON] Fetching data at', new Date().toISOString());
 
   try {
-    // --- 1. Get OAuth2 Token ---
+    // --- 1. Get OAuth2 Token (cached, skips on Railway) ---
     const token = await getOpenSkyToken();
     const headers = {};
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
+      console.log('[CRON] Using OAuth2 authentication');
     } else {
-      console.warn('[CRON] ⚠️ No token available, trying anonymous access...');
+      console.log('[CRON] Using anonymous access');
     }
     
-    // --- 2. Fetch flight data with retry logic ---
-    let adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { headers });
+    // --- 2. Fetch flight data with timeout ---
+    let adsbRes;
+    try {
+      adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { 
+        headers,
+        timeout: 15000
+      });
+    } catch (fetchErr) {
+      if (fetchErr.message.includes('ETIMEDOUT') || fetchErr.message.includes('connect')) {
+        console.warn('[CRON] ⚠️ OpenSky API timed out. Using cached data.');
+        if (cache.currentFlight) {
+          console.log('[CRON] Using cached flight data from', cache.currentFlight.timestamp);
+        }
+        return;
+      }
+      throw fetchErr;
+    }
     
     // If rate limited, retry with exponential backoff
     if (adsbRes.status === 429) {
@@ -155,14 +223,14 @@ async function runCronJob() {
         retryCount++;
         console.warn(`[CRON] Retry ${retryCount}/${maxRetries} after ${retryDelay}ms...`);
         
-        // Refresh token before retry
+        // Refresh token before retry (or skip on Railway)
         const newToken = await getOpenSkyToken();
         const retryHeaders = {};
         if (newToken) {
           retryHeaders['Authorization'] = `Bearer ${newToken}`;
         }
         
-        adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { headers: retryHeaders });
+        adsbRes = await fetch('https://opensky-network.org/api/states/all?time=0', { headers: retryHeaders, timeout: 15000 });
         
         if (adsbRes.ok) {
           console.warn('[CRON] ✅ Retry successful!');
