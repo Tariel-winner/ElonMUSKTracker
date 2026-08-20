@@ -125,6 +125,109 @@ function isValidHeading(h) {
   return h !== null && h !== undefined && !isNaN(h);
 }
 
+/** Compass label from degrees (0 = North). */
+function headingToCardinal(deg) {
+  if (!isValidHeading(deg)) return 'unknown direction';
+  const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+  const i = Math.round(((deg % 360) + 360) % 360 / 22.5) % 16;
+  return dirs[i];
+}
+
+/** Rough region from lat/lng (no external geocoder). */
+function roughRegion(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return 'unknown area';
+  // Very coarse US-centric bands for study UI
+  if (lat > 49 && lng < -95) return 'northern plains / Canada border area';
+  if (lat > 40 && lng > -80) return 'US Northeast / Mid-Atlantic area';
+  if (lat > 40 && lng > -95 && lng <= -80) return 'US Midwest area';
+  if (lat > 40 && lng <= -95) return 'US Northwest / northern Rockies area';
+  if (lat > 30 && lng > -85) return 'US Southeast area';
+  if (lat > 30 && lng > -100 && lng <= -85) return 'US South-Central area';
+  if (lat > 30 && lng <= -100) return 'US Southwest / southern Rockies area';
+  if (lat > 24 && lng > -100) return 'Gulf / South Texas area';
+  if (lat > 24 && lng <= -100) return 'Southwest / Baja-adjacent area';
+  return `${lat.toFixed(2)}°N, ${Math.abs(lng).toFixed(2)}°W`;
+}
+
+/** Nearest airport name if within maxMi. */
+function nearestAirportLabel(lat, lng, maxMi = 80) {
+  const airports = staticData.airports || [];
+  let best = null;
+  let bestD = Infinity;
+  for (const a of airports) {
+    if (!Number.isFinite(a.lat) || !Number.isFinite(a.lng)) continue;
+    const d = haversine(lat, lng, a.lat, a.lng);
+    if (d < bestD) {
+      bestD = d;
+      best = a;
+    }
+  }
+  if (best && bestD <= maxMi) {
+    return `${best.name || best.code} (~${Math.round(bestD)} mi)`;
+  }
+  return null;
+}
+
+/**
+ * Human explanation of where the aircraft is and which way it is going
+ * (even when destination place is Unknown).
+ */
+function describeAirborneSituation(flight, heading) {
+  const lat = flight.lat;
+  const lon = flight.lon ?? flight.lng;
+  const speed = flight.gs ?? flight.speed ?? 0;
+  const alt = flight.alt_baro ?? flight.altitude;
+  const region = roughRegion(lat, lon);
+  const nearApt = nearestAirportLabel(lat, lon);
+  const card = headingToCardinal(heading);
+  const parts = [];
+
+  parts.push(
+    `Aircraft is airborne over the ${region}` +
+      (nearApt ? `, near ${nearApt}` : '') +
+      ` at ${Number(lat).toFixed(3)}°, ${Number(lon).toFixed(3)}°.`
+  );
+
+  if (isValidHeading(heading)) {
+    parts.push(
+      `Track/heading ≈ ${Number(heading).toFixed(0)}° (${card})` +
+        (speed > 0 ? ` at ~${Math.round(speed)} kt` : '') +
+        (alt != null ? `, alt ~${Math.round(alt)}` : '') +
+        `.`
+    );
+  } else {
+    parts.push('Heading not available from ADS-B.');
+  }
+
+  // Closest place in the direction of travel (info only — may still be Unknown dest)
+  if (isValidHeading(heading)) {
+    let best = null;
+    let bestScore = Infinity;
+    for (const p of staticData.getPlacesFor('in_flight')) {
+      if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+      const dist = haversine(lat, lon, p.lat, p.lng);
+      if (dist > 800) continue;
+      const brg = calculateBearing(lat, lon, p.lat, p.lng);
+      if (brg == null) continue;
+      const diff = angleDiff(heading, brg);
+      // Prefer somewhat ahead; report even if outside tight cone
+      if (diff < 90 && dist < bestScore) {
+        bestScore = dist;
+        best = { p, dist, diff };
+      }
+    }
+    if (best) {
+      parts.push(
+        `No list place in the tight heading cone; nearest place somewhat ahead: ${best.p.name} (~${Math.round(best.dist)} mi, ${Math.round(best.diff)}° off track) — not set as destination.`
+      );
+    } else {
+      parts.push('No known place from the study list lies roughly ahead on this track.');
+    }
+  }
+
+  return parts;
+}
+
 /**
  * Nearest place using places[] + per-place max_radius + weight.
  * useCase: 'in_flight' | 'grounded'
@@ -414,13 +517,27 @@ async function runCronJob() {
       }
 
       conclusion.phase = flight.on_ground ? 'landed' : 'in_flight';
-      conclusion.status_message = flight.on_ground
-        ? (conclusion.destination !== 'Unknown'
+
+      if (!flight.on_ground) {
+        const explain = describeAirborneSituation(flight, heading);
+        // Replace vague correlator line with concrete where / heading
+        conclusion.reasoning = [
+          ...explain,
+          ...(conclusion.destination !== 'Unknown'
+            ? [`Listed destination hypothesis: ${conclusion.destination}.`]
+            : ['Destination place: Unknown (no strong match in places list).']),
+        ];
+        conclusion.current_location =
+          `Airborne · ${roughRegion(flight.lat, flight.lon)} · ${headingToCardinal(heading)} (${isValidHeading(heading) ? heading.toFixed(0) + '°' : 'n/a'})`;
+        conclusion.status_message =
+          conclusion.destination !== 'Unknown'
+            ? `In flight — ${headingToCardinal(heading)}; place hypothesis: ${conclusion.destination}.`
+            : `In flight over ${roughRegion(flight.lat, flight.lon)}, heading ${headingToCardinal(heading)} — no matching place in list.`;
+      } else {
+        conclusion.status_message = conclusion.destination !== 'Unknown'
           ? 'Aircraft on ground — nearby place is a hypothesis only.'
-          : 'Aircraft on ground — no strong place match.')
-        : (conclusion.destination !== 'Unknown'
-          ? 'In flight — destination is a heading hypothesis only.'
-          : 'In flight — tracking position; destination unknown.');
+          : 'Aircraft on ground — no strong place match.';
+      }
       conclusion.data_source = dataSource;
       conclusion.from_cache = fromCache || isUsingCachedFlight;
 

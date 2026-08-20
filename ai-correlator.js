@@ -114,7 +114,13 @@ function generateConclusion(flight, trafficData) {
     } else {
       conclusion.destination = 'Unknown';
       conclusion.confidence = 0.0;
-      conclusion.reasoning.push('Heading does not match any known destination.');
+      const h = flight.heading;
+      const dir = (h !== null && h !== undefined && !isNaN(h))
+        ? `${Math.round(h)}°`
+        : 'unknown';
+      conclusion.reasoning.push(
+        `No listed place matches this heading (${dir}). Position ${flight.lat}, ${flight.lng} is still tracked.`
+      );
     }
   }
 
