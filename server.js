@@ -132,7 +132,8 @@ cron.schedule('0 */12 * * *', async () => {
 // START SERVER
 // =============================================
 
-app.listen(port, () => {
+app.listen(port,'0.0.0.0', () => {
+  console.log(`Listening on 0.0.0.0:${port} (PORT=${process.env.PORT})`);
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
 ║  🛩️  ELON MUSK TRACKER - BACKEND SERVER                 ║
