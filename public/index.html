@@ -472,6 +472,85 @@
     }
     
     /* ============================================= */
+    /* CARDS TRACK - NEW for double sync */
+    /* ============================================= */
+    .cards-track {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 8px;
+      margin-top: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      flex: 1;
+      padding: 4px 2px 8px 2px;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      min-height: 80px;
+      max-height: 120px;
+    }
+    
+    .cards-track .card-item {
+      min-width: 180px;
+      max-width: 240px;
+      flex-shrink: 0;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 10px 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      transition: all 0.2s ease;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    
+    .cards-track .card-item.active {
+      border-color: #00d4ff;
+      background: rgba(0, 212, 255, 0.1);
+      box-shadow: 0 0 20px rgba(0, 212, 255, 0.1);
+    }
+    
+    .cards-track .card-item .card-time {
+      font-size: 10px;
+      color: #666;
+      margin-bottom: 3px;
+    }
+    
+    .cards-track .card-item .card-dest {
+      font-size: 13px;
+      font-weight: 600;
+      color: #eee;
+    }
+    
+    .cards-track .card-item .card-conf {
+      font-size: 10px;
+      color: #888;
+      margin-top: 2px;
+    }
+    
+    .cards-track .card-item .card-state {
+      font-size: 10px;
+      color: #555;
+    }
+    
+    .cards-track::-webkit-scrollbar {
+      height: 3px;
+    }
+    
+    .cards-track::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    
+    .cards-track::-webkit-scrollbar-thumb {
+      background: rgba(0, 212, 255, 0.3);
+      border-radius: 2px;
+    }
+    
+    .cards-track::-webkit-scrollbar-thumb:hover {
+      background: rgba(0, 212, 255, 0.5);
+    }
+    
+    /* ============================================= */
     /* MOBILE RESPONSIVE - OPTIMIZED FOR PHONES */
     /* ============================================= */
     @media (max-width: 768px) {
@@ -577,6 +656,20 @@
       .timeline-events .event .conf {
         font-size: 7px;
       }
+      
+      .cards-track .card-item {
+        min-width: 140px;
+        max-width: 180px;
+        padding: 8px 12px;
+      }
+      
+      .cards-track .card-item .card-dest {
+        font-size: 11px;
+      }
+      
+      .cards-track .card-item .card-time {
+        font-size: 9px;
+      }
     }
     
     /* Small phones (<= 400px) */
@@ -627,6 +720,16 @@
       
       .timeline-events .event .conf {
         font-size: 6px;
+      }
+      
+      .cards-track .card-item {
+        min-width: 120px;
+        max-width: 150px;
+        padding: 6px 10px;
+      }
+      
+      .cards-track .card-item .card-dest {
+        font-size: 10px;
       }
     }
   </style>
@@ -695,11 +798,18 @@
         <div class="timeline-container">
           <div class="slider-header">
             <span>⏱️ Timeline</span>
-            <span class="live-label" id="slider-mode">🔴 LIVE</span>
+            <span class="live-label" id="slider-mode" style="cursor:pointer;" title="Click to return to LIVE">🔴 LIVE</span>
           </div>
           <input type="range" id="time-slider" min="0" max="100" value="100" />
+          
+          <!-- Timeline Events (chips) -->
           <div class="timeline-events" id="timeline-events">
             <span class="event">No events yet</span>
+          </div>
+          
+          <!-- ✅ NEW: Cards Track (syncs with timeline) -->
+          <div class="cards-track" id="cards-track">
+            <div class="card-item">No cards yet</div>
           </div>
         </div>
       </div>
@@ -709,7 +819,7 @@
   <!-- Leaflet JS (Map Library) -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   
-  <!-- ✅ FIX: Load frontend-polling.js as external file -->
+  <!-- Frontend Logic -->
   <script src="/frontend-polling.js"></script>
 </body>
 </html>
